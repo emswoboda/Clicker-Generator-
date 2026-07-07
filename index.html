@@ -134,6 +134,7 @@
       <button id="traceButton">Trace Silhouette</button>
       <button id="exportCapButton">Download Cap STL</button>
       <button id="exportBaseButton">Download Base STL</button>
+      <button id="exportDesignButton">Download Raised Design STL</button>
 
       <p id="statusText" class="note">Waiting for image...</p>
     </div>
@@ -156,6 +157,7 @@
     const traceButton = document.getElementById("traceButton");
     const exportCapButton = document.getElementById("exportCapButton");
     const exportBaseButton = document.getElementById("exportBaseButton");
+    const exportDesignButton = document.getElementById("exportDesignButton");
 
     const thresholdSlider = document.getElementById("thresholdSlider");
     const mergeSlider = document.getElementById("mergeSlider");
@@ -221,6 +223,15 @@
         alert("Trace an image first.");
         return;
       }
+      exportDesignButton.addEventListener("click", () => {
+  if (!currentOutlinePoints || !loadedImage) {
+    alert("Trace an image first.");
+    return;
+  }
+
+  const stl = makeRaisedDesignSTL(currentOutlinePoints);
+  downloadTextFile(stl, "custom_clicker_raised_design.stl", "model/stl");
+});
       const stl = makeBaseSTL(currentOutlinePoints);
       downloadTextFile(stl, "custom_clicker_base.stl", "model/stl");
     });
@@ -665,6 +676,9 @@
       capMaxSize: 40,
       baseMaxSize: 50,
       capTotalHeight: 8,
+      detailRaiseHeight: 0.5,
+      detailGridSize: 90,
+      detailDarkThreshold: 135,
       capInnerCavityDiameter: 20,
       capInnerCavityDepth: 3.8,
       socketPostHeight: 3.8,
@@ -714,6 +728,65 @@
       const circleBottomZ = Math.max(0.6, midZ - CLICKER.switchTopSquareDepth - CLICKER.switchLowerSquareDepth - CLICKER.switchCenterCircleDepth);
       let triangles = [];
 
+      function makeRaisedDesignSTL(canvasPoints) {
+  const transform = makePointTransform(canvasPoints, CLICKER.capMaxSize);
+
+  const width = sourceCanvas.width;
+  const height = sourceCanvas.height;
+  const imageData = sourceCtx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+
+  const gridSize = CLICKER.detailGridSize;
+  const cellW = width / gridSize;
+  const cellH = height / gridSize;
+
+  const z0 = CLICKER.capTotalHeight;
+  const z1 = CLICKER.capTotalHeight + CLICKER.detailRaiseHeight;
+
+  let triangles = [];
+
+  for (let gy = 0; gy < gridSize; gy++) {
+    for (let gx = 0; gx < gridSize; gx++) {
+      const px = Math.floor((gx + 0.5) * cellW);
+      const py = Math.floor((gy + 0.5) * cellH);
+
+      const i = (py * width + px) * 4;
+
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      const a = data[i + 3];
+
+      if (a < 20) continue;
+
+      const brightness = (r + g + b) / 3;
+
+      // Dark areas become the raised design.
+      if (brightness > CLICKER.detailDarkThreshold) continue;
+
+      const p1 = transform({
+        x: gx * cellW,
+        y: gy * cellH
+      });
+
+      const p2 = transform({
+        x: (gx + 1) * cellW,
+        y: (gy + 1) * cellH
+      });
+
+      const square = [
+        { x: p1.x, y: p1.y },
+        { x: p2.x, y: p1.y },
+        { x: p2.x, y: p2.y },
+        { x: p1.x, y: p2.y }
+      ];
+
+      triangles.push(...extrudePolygonWithHoles(square, [], z0, z1));
+    }
+  }
+
+  return trianglesToAsciiSTL(triangles, "custom_clicker_raised_design");
+}
       // Bottom skin under center circle indent.
       triangles.push(...extrudePolygonWithHoles(baseShape, [], 0, circleBottomZ));
 
@@ -762,6 +835,27 @@
       if (polygonArea(mm) < 0) mm.reverse();
       return mm;
     }
+    function makePointTransform(points, targetMaxSize) {
+  const minX = Math.min(...points.map(p => p.x));
+  const maxX = Math.max(...points.map(p => p.x));
+  const minY = Math.min(...points.map(p => p.y));
+  const maxY = Math.max(...points.map(p => p.y));
+
+  const w = maxX - minX;
+  const h = maxY - minY;
+  const scale = targetMaxSize / Math.max(w, h);
+
+  const center = weightedVisualCenter(points);
+  const cx = center.x;
+  const cy = center.y;
+
+  return function transformPoint(p) {
+    return {
+      x: (p.x - cx) * scale,
+      y: -(p.y - cy) * scale
+    };
+  };
+}
 function weightedVisualCenter(points) {
   const bboxCenter = {
     x: (Math.min(...points.map(p => p.x)) + Math.max(...points.map(p => p.x))) / 2,
