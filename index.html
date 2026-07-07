@@ -164,20 +164,34 @@
     });
 
     imageInput.addEventListener("change", () => {
-      const file = imageInput.files[0];
-      if (!file) return;
+  const file = imageInput.files[0];
+  if (!file) return;
 
-      const img = new Image();
+  const img = new Image();
 
-      img.onload = () => {
-        loadedImage = img;
-        drawImageToSourceCanvas();
-        clearPreview();
-      };
+  img.onload = () => {
+    loadedImage = img;
+    drawImageToSourceCanvas();
 
-      img.src = URL.createObjectURL(file);
-    });
+    const mask = createForegroundMask();
+    const outline = traceOuterSilhouette(mask);
 
+    if (outline.length < 10) {
+      clearPreview();
+      previewCtx.fillStyle = "#111827";
+      previewCtx.font = "bold 18px Arial";
+      previewCtx.textAlign = "center";
+      previewCtx.fillText("Could not find a clear outline.", previewCanvas.width / 2, 240);
+      previewCtx.fillText("Try a simpler image or adjust sensitivity.", previewCanvas.width / 2, 270);
+      return;
+    }
+
+    const smoothed = smoothOutline(outline, Number(smoothSlider.value));
+    drawClickerPreview(smoothed);
+  };
+
+  img.src = URL.createObjectURL(file);
+});
     traceButton.addEventListener("click", () => {
       if (!loadedImage) {
         alert("Upload an image first.");
