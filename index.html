@@ -133,6 +133,7 @@
       <div class="canvas-card">
         <h3>Detected Clicker Shape</h3>
         <canvas id="previewCanvas" width="500" height="500"></canvas>
+        <p id="statusText" class="note">Waiting for image...</p>
       </div>
     </div>
   </div>
@@ -149,6 +150,7 @@
 
     const sourceCanvas = document.getElementById("sourceCanvas");
     const sourceCtx = sourceCanvas.getContext("2d", { willReadFrequently: true });
+    const statusText = document.getElementById("statusText");
 
     const previewCanvas = document.getElementById("previewCanvas");
     const previewCtx = previewCanvas.getContext("2d");
@@ -188,24 +190,30 @@ function retraceIfImageLoaded() {
   const img = new Image();
 
   img.onload = () => {
+    statusText.textContent = "Image loaded. Tracing...";
     loadedImage = img;
     drawImageToSourceCanvas();
 
     const mask = createForegroundMask();
     const outline = traceOuterSilhouette(mask);
 
-    if (outline.length < 10) {
-      clearPreview();
-      previewCtx.fillStyle = "#111827";
-      previewCtx.font = "bold 18px Arial";
-      previewCtx.textAlign = "center";
-      previewCtx.fillText("Could not find a clear outline.", previewCanvas.width / 2, 240);
-      previewCtx.fillText("Try a simpler image or adjust sensitivity.", previewCanvas.width / 2, 270);
-      return;
-    }
+ if (outline.length < 10) {
+  clearPreview();
+
+  statusText.textContent = "No clear outline found. Try changing sensitivity.";
+
+  previewCtx.fillStyle = "#111827";
+  previewCtx.font = "bold 18px Arial";
+  previewCtx.textAlign = "center";
+  previewCtx.fillText("Could not find a clear outline.", previewCanvas.width / 2, 240);
+  previewCtx.fillText("Try a simpler image or adjust sensitivity.", previewCanvas.width / 2, 270);
+
+  return;
+}
 
     const smoothed = smoothOutline(outline, Number(smoothSlider.value));
     drawClickerPreview(smoothed);
+    statusText.textContent = "Trace complete.";
   };
 
   img.src = URL.createObjectURL(file);
