@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <title>Clicker Generator</title>
+
   <style>
     body {
       font-family: Arial, sans-serif;
@@ -14,6 +15,7 @@
 
     h1 {
       margin-top: 0;
+      font-size: 40px;
     }
 
     .panel {
@@ -21,62 +23,446 @@
       border: 1px solid #374151;
       border-radius: 12px;
       padding: 20px;
-      max-width: 900px;
+      max-width: 1000px;
     }
 
-    input, button {
+    .controls {
+      margin-top: 20px;
+      display: grid;
+      gap: 16px;
+      max-width: 500px;
+    }
+
+    label {
+      font-weight: bold;
+    }
+
+    input[type="file"],
+    input[type="range"],
+    button {
       font-size: 16px;
-      margin-top: 12px;
+      margin-top: 6px;
+    }
+
+    button {
+      padding: 10px 14px;
+      border: none;
+      border-radius: 8px;
+      background: #2563eb;
+      color: white;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #1d4ed8;
+    }
+
+    .canvas-row {
+      margin-top: 24px;
+      display: flex;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+
+    .canvas-card {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 12px;
     }
 
     canvas {
-      margin-top: 20px;
       background: white;
       border-radius: 8px;
       max-width: 100%;
     }
+
+    .note {
+      color: #cbd5e1;
+      line-height: 1.5;
+    }
+
+    .value {
+      color: #93c5fd;
+      font-weight: normal;
+    }
   </style>
 </head>
+
 <body>
   <div class="panel">
     <h1>Clicker Generator</h1>
-    <p>Upload a simple image to start turning it into a custom clicker shape.</p>
 
-    <input type="file" id="imageInput" accept="image/*" />
+    <p class="note">
+      Upload a simple image. This version detects the outside silhouette and previews a matching clicker shape.
+      Use simple images with a clear outline for best results.
+    </p>
 
-    <br />
+    <div class="controls">
+      <div>
+        <label for="imageInput">Upload image</label><br />
+        <input type="file" id="imageInput" accept="image/*" />
+      </div>
 
-    <canvas id="canvas" width="600" height="600"></canvas>
+      <div>
+        <label for="thresholdSlider">
+          Background sensitivity:
+          <span id="thresholdValue" class="value">35</span>
+        </label><br />
+        <input type="range" id="thresholdSlider" min="5" max="120" value="35" />
+      </div>
+
+      <div>
+        <label for="smoothSlider">
+          Outline smoothing:
+          <span id="smoothValue" class="value">8</span>
+        </label><br />
+        <input type="range" id="smoothSlider" min="1" max="30" value="8" />
+      </div>
+
+      <button id="traceButton">Trace Silhouette</button>
+    </div>
+
+    <div class="canvas-row">
+      <div class="canvas-card">
+        <h3>Original</h3>
+        <canvas id="sourceCanvas" width="500" height="500"></canvas>
+      </div>
+
+      <div class="canvas-card">
+        <h3>Detected Clicker Shape</h3>
+        <canvas id="previewCanvas" width="500" height="500"></canvas>
+      </div>
+    </div>
   </div>
 
   <script>
     const imageInput = document.getElementById("imageInput");
-    const canvas = document.getElementById("canvas");
-    const ctx = canvas.getContext("2d");
+    const traceButton = document.getElementById("traceButton");
 
-    imageInput.addEventListener("change", function () {
+    const thresholdSlider = document.getElementById("thresholdSlider");
+    const smoothSlider = document.getElementById("smoothSlider");
+
+    const thresholdValue = document.getElementById("thresholdValue");
+    const smoothValue = document.getElementById("smoothValue");
+
+    const sourceCanvas = document.getElementById("sourceCanvas");
+    const sourceCtx = sourceCanvas.getContext("2d", { willReadFrequently: true });
+
+    const previewCanvas = document.getElementById("previewCanvas");
+    const previewCtx = previewCanvas.getContext("2d");
+
+    let loadedImage = null;
+
+    thresholdSlider.addEventListener("input", () => {
+      thresholdValue.textContent = thresholdSlider.value;
+    });
+
+    smoothSlider.addEventListener("input", () => {
+      smoothValue.textContent = smoothSlider.value;
+    });
+
+    imageInput.addEventListener("change", () => {
       const file = imageInput.files[0];
       if (!file) return;
 
       const img = new Image();
-      img.onload = function () {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        const scale = Math.min(
-          canvas.width / img.width,
-          canvas.height / img.height
-        );
-
-        const width = img.width * scale;
-        const height = img.height * scale;
-        const x = (canvas.width - width) / 2;
-        const y = (canvas.height - height) / 2;
-
-        ctx.drawImage(img, x, y, width, height);
+      img.onload = () => {
+        loadedImage = img;
+        drawImageToSourceCanvas();
+        clearPreview();
       };
 
       img.src = URL.createObjectURL(file);
     });
+
+    traceButton.addEventListener("click", () => {
+      if (!loadedImage) {
+        alert("Upload an image first.");
+        return;
+      }
+
+      drawImageToSourceCanvas();
+      const mask = createForegroundMask();
+      const outline = traceOuterSilhouette(mask);
+
+      if (outline.length < 10) {
+        alert("Could not find a clear outline. Try a simpler image or adjust background sensitivity.");
+        return;
+      }
+
+      const smoothed = smoothOutline(outline, Number(smoothSlider.value));
+      drawClickerPreview(smoothed);
+    });
+
+    function drawImageToSourceCanvas() {
+      sourceCtx.clearRect(0, 0, sourceCanvas.width, sourceCanvas.height);
+
+      const padding = 40;
+      const maxW = sourceCanvas.width - padding * 2;
+      const maxH = sourceCanvas.height - padding * 2;
+
+      const scale = Math.min(
+        maxW / loadedImage.width,
+        maxH / loadedImage.height
+      );
+
+      const w = loadedImage.width * scale;
+      const h = loadedImage.height * scale;
+      const x = (sourceCanvas.width - w) / 2;
+      const y = (sourceCanvas.height - h) / 2;
+
+      sourceCtx.fillStyle = "white";
+      sourceCtx.fillRect(0, 0, sourceCanvas.width, sourceCanvas.height);
+      sourceCtx.drawImage(loadedImage, x, y, w, h);
+    }
+
+    function clearPreview() {
+      previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+      previewCtx.fillStyle = "white";
+      previewCtx.fillRect(0, 0, previewCanvas.width, previewCanvas.height);
+    }
+
+    function createForegroundMask() {
+      const width = sourceCanvas.width;
+      const height = sourceCanvas.height;
+      const imageData = sourceCtx.getImageData(0, 0, width, height);
+      const data = imageData.data;
+
+      const threshold = Number(thresholdSlider.value);
+      const mask = new Uint8Array(width * height);
+
+      // Estimate background from the four corners.
+      const corners = [
+        getPixel(data, width, 5, 5),
+        getPixel(data, width, width - 6, 5),
+        getPixel(data, width, 5, height - 6),
+        getPixel(data, width, width - 6, height - 6)
+      ];
+
+      const bg = {
+        r: Math.round(corners.reduce((sum, p) => sum + p.r, 0) / corners.length),
+        g: Math.round(corners.reduce((sum, p) => sum + p.g, 0) / corners.length),
+        b: Math.round(corners.reduce((sum, p) => sum + p.b, 0) / corners.length)
+      };
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const i = (y * width + x) * 4;
+
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          const a = data[i + 3];
+
+          const diff = Math.sqrt(
+            Math.pow(r - bg.r, 2) +
+            Math.pow(g - bg.g, 2) +
+            Math.pow(b - bg.b, 2)
+          );
+
+          const isTransparent = a < 20;
+          const isForeground = !isTransparent && diff > threshold;
+
+          mask[y * width + x] = isForeground ? 1 : 0;
+        }
+      }
+
+      return {
+        data: mask,
+        width,
+        height
+      };
+    }
+
+    function getPixel(data, width, x, y) {
+      const i = (y * width + x) * 4;
+
+      return {
+        r: data[i],
+        g: data[i + 1],
+        b: data[i + 2]
+      };
+    }
+
+    function traceOuterSilhouette(mask) {
+      const { data, width, height } = mask;
+
+      const boundaryPoints = [];
+
+      for (let y = 1; y < height - 1; y++) {
+        for (let x = 1; x < width - 1; x++) {
+          const index = y * width + x;
+
+          if (data[index] === 0) continue;
+
+          const hasBackgroundNeighbor =
+            data[index - 1] === 0 ||
+            data[index + 1] === 0 ||
+            data[index - width] === 0 ||
+            data[index + width] === 0;
+
+          if (hasBackgroundNeighbor) {
+            boundaryPoints.push({ x, y });
+          }
+        }
+      }
+
+      if (boundaryPoints.length === 0) return [];
+
+      // Keep only the largest connected boundary-ish area by approximating with convex hull.
+      // This is not perfect, but it is a useful first version.
+      return convexHull(boundaryPoints);
+    }
+
+    function convexHull(points) {
+      const sorted = [...points].sort((a, b) => {
+        if (a.x === b.x) return a.y - b.y;
+        return a.x - b.x;
+      });
+
+      const cross = (o, a, b) =>
+        (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+
+      const lower = [];
+      for (const p of sorted) {
+        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) {
+          lower.pop();
+        }
+        lower.push(p);
+      }
+
+      const upper = [];
+      for (let i = sorted.length - 1; i >= 0; i--) {
+        const p = sorted[i];
+        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) {
+          upper.pop();
+        }
+        upper.push(p);
+      }
+
+      lower.pop();
+      upper.pop();
+
+      return lower.concat(upper);
+    }
+
+    function smoothOutline(points, amount) {
+      if (points.length < 3) return points;
+
+      let smoothed = points.map(p => ({ ...p }));
+
+      for (let pass = 0; pass < amount; pass++) {
+        smoothed = smoothed.map((point, i) => {
+          const prev = smoothed[(i - 1 + smoothed.length) % smoothed.length];
+          const next = smoothed[(i + 1) % smoothed.length];
+
+          return {
+            x: (prev.x + point.x * 2 + next.x) / 4,
+            y: (prev.y + point.y * 2 + next.y) / 4
+          };
+        });
+      }
+
+      return smoothed;
+    }
+
+    function drawClickerPreview(points) {
+      clearPreview();
+
+      const fitted = fitPointsToCanvas(points, previewCanvas.width, previewCanvas.height, 70);
+
+      // Base shape.
+      drawShape(previewCtx, fitted, {
+        fill: "#9ca3af",
+        stroke: "#4b5563",
+        lineWidth: 8,
+        offsetX: 10,
+        offsetY: 16
+      });
+
+      // Top cap shape.
+      drawShape(previewCtx, fitted, {
+        fill: "#2563eb",
+        stroke: "#1e40af",
+        lineWidth: 5,
+        offsetX: 0,
+        offsetY: 0
+      });
+
+      // Inner decorative outline.
+      drawShape(previewCtx, scaleAroundCenter(fitted, 0.78), {
+        fill: "transparent",
+        stroke: "white",
+        lineWidth: 5,
+        offsetX: 0,
+        offsetY: 0
+      });
+
+      previewCtx.fillStyle = "#111827";
+      previewCtx.font = "bold 18px Arial";
+      previewCtx.textAlign = "center";
+      previewCtx.fillText("Shape preview only — STL export comes next", previewCanvas.width / 2, 470);
+    }
+
+    function fitPointsToCanvas(points, width, height, padding) {
+      const minX = Math.min(...points.map(p => p.x));
+      const maxX = Math.max(...points.map(p => p.x));
+      const minY = Math.min(...points.map(p => p.y));
+      const maxY = Math.max(...points.map(p => p.y));
+
+      const shapeW = maxX - minX;
+      const shapeH = maxY - minY;
+
+      const scale = Math.min(
+        (width - padding * 2) / shapeW,
+        (height - padding * 2) / shapeH
+      );
+
+      return points.map(p => ({
+        x: (p.x - minX - shapeW / 2) * scale + width / 2,
+        y: (p.y - minY - shapeH / 2) * scale + height / 2
+      }));
+    }
+
+    function scaleAroundCenter(points, scale) {
+      const cx = points.reduce((sum, p) => sum + p.x, 0) / points.length;
+      const cy = points.reduce((sum, p) => sum + p.y, 0) / points.length;
+
+      return points.map(p => ({
+        x: cx + (p.x - cx) * scale,
+        y: cy + (p.y - cy) * scale
+      }));
+    }
+
+    function drawShape(ctx, points, options) {
+      const offsetX = options.offsetX || 0;
+      const offsetY = options.offsetY || 0;
+
+      ctx.beginPath();
+      ctx.moveTo(points[0].x + offsetX, points[0].y + offsetY);
+
+      for (let i = 1; i < points.length; i++) {
+        ctx.lineTo(points[i].x + offsetX, points[i].y + offsetY);
+      }
+
+      ctx.closePath();
+
+      if (options.fill && options.fill !== "transparent") {
+        ctx.fillStyle = options.fill;
+        ctx.fill();
+      }
+
+      if (options.stroke) {
+        ctx.strokeStyle = options.stroke;
+        ctx.lineWidth = options.lineWidth || 2;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        ctx.stroke();
+      }
+    }
   </script>
 </body>
 </html>
