@@ -327,67 +327,141 @@ function retraceIfImageLoaded() {
       };
     }
 
-    function traceOuterSilhouette(mask) {
-      const { data, width, height } = mask;
+function traceOuterSilhouette(mask) {
+  const { data, width, height } = mask;
 
-      const boundaryPoints = [];
+  // Step 1: keep only the biggest connected foreground blob.
+  const component = getLargestComponent(data, width, height);
 
-      for (let y = 1; y < height - 1; y++) {
-        for (let x = 1; x < width - 1; x++) {
-          const index = y * width + x;
+  if (!component || component.size < 20) {
+    return [];
+  }
 
-          if (data[index] === 0) continue;
+  // Step 2: collect boundary points from that blob.
+  const boundaryPoints = [];
 
-          const hasBackgroundNeighbor =
-            data[index - 1] === 0 ||
-            data[index + 1] === 0 ||
-            data[index - width] === 0 ||
-            data[index + width] === 0;
+  for (const index of component.pixels) {
+    const x = index % width;
+    const y = Math.floor(index / width);
 
-          if (hasBackgroundNeighbor) {
-            boundaryPoints.push({ x, y });
+    if (x <= 0 || x >= width - 1 || y <= 0 || y >= height - 1) continue;
+
+    const hasBackgroundNeighbor =
+      !component.set.has(index - 1) ||
+      !component.set.has(index + 1) ||
+      !component.set.has(index - width) ||
+      !component.set.has(index + width);
+
+    if (hasBackgroundNeighbor) {
+      boundaryPoints.push({ x, y });
+    }
+  }
+
+  if (boundaryPoints.length < 10) {
+    return [];
+  }
+
+  // Step 3: turn boundary cloud into an ordered outer outline.
+  return radialOuterOutline(boundaryPoints, 360);
+}
+
+function getLargestComponent(data, width, height) {
+  const visited = new Uint8Array(width * height);
+  let bestPixels = [];
+
+  const directions = [
+    [-1, 0],
+    [1, 0],
+    [0, -1],
+    [0, 1]
+  ];
+
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const startIndex = y * width + x;
+
+      if (visited[startIndex] || data[startIndex] === 0) continue;
+
+      const queue = [startIndex];
+      const pixels = [];
+      visited[startIndex] = 1;
+
+      while (queue.length > 0) {
+        const index = queue.pop();
+        pixels.push(index);
+
+        const px = index % width;
+        const py = Math.floor(index / width);
+
+        for (const [dx, dy] of directions) {
+          const nx = px + dx;
+          const ny = py + dy;
+          const nIndex = ny * width + nx;
+
+          if (
+            nx <= 0 ||
+            nx >= width - 1 ||
+            ny <= 0 ||
+            ny >= height - 1 ||
+            visited[nIndex] ||
+            data[nIndex] === 0
+          ) {
+            continue;
           }
+
+          visited[nIndex] = 1;
+          queue.push(nIndex);
         }
       }
 
-      if (boundaryPoints.length === 0) return [];
-
-      // Keep only the largest connected boundary-ish area by approximating with convex hull.
-      // This is not perfect, but it is a useful first version.
-      return convexHull(boundaryPoints);
+      if (pixels.length > bestPixels.length) {
+        bestPixels = pixels;
+      }
     }
+  }
 
-    function convexHull(points) {
-      const sorted = [...points].sort((a, b) => {
-        if (a.x === b.x) return a.y - b.y;
-        return a.x - b.x;
+  return {
+    size: bestPixels.length,
+    pixels: bestPixels,
+    set: new Set(bestPixels)
+  };
+}
+
+function radialOuterOutline(points, binCount) {
+  const cx = points.reduce((sum, p) => sum + p.x, 0) / points.length;
+  const cy = points.reduce((sum, p) => sum + p.y, 0) / points.length;
+
+  const bins = new Array(binCount).fill(null);
+
+  for (const p of points) {
+    const angle = Math.atan2(p.y - cy, p.x - cx);
+    const normalized = angle < 0 ? angle + Math.PI * 2 : angle;
+    const bin = Math.floor((normalized / (Math.PI * 2)) * binCount);
+
+    const distance = Math.hypot(p.x - cx, p.y - cy);
+
+    if (!bins[bin] || distance > bins[bin].distance) {
+      bins[bin] = {
+        x: p.x,
+        y: p.y,
+        distance
+      };
+    }
+  }
+
+  const outline = [];
+
+  for (const point of bins) {
+    if (point) {
+      outline.push({
+        x: point.x,
+        y: point.y
       });
-
-      const cross = (o, a, b) =>
-        (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-
-      const lower = [];
-      for (const p of sorted) {
-        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) {
-          lower.pop();
-        }
-        lower.push(p);
-      }
-
-      const upper = [];
-      for (let i = sorted.length - 1; i >= 0; i--) {
-        const p = sorted[i];
-        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) {
-          upper.pop();
-        }
-        upper.push(p);
-      }
-
-      lower.pop();
-      upper.pop();
-
-      return lower.concat(upper);
     }
+  }
+
+  return outline;
+}
 
     function smoothOutline(points, amount) {
       if (points.length < 3) return points;
