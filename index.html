@@ -664,7 +664,7 @@
     const CLICKER = {
       capMaxSize: 40,
       baseMaxSize: 50,
-      capTotalHeight: 12,
+      capTotalHeight: 8,
       capInnerCavityDiameter: 20,
       capInnerCavityDepth: 3.8,
       socketPostHeight: 3.8,
@@ -755,13 +755,60 @@
       const w = maxX - minX;
       const h = maxY - minY;
       const scale = targetMaxSize / Math.max(w, h);
-      const cx = (minX + maxX) / 2;
-      const cy = (minY + maxY) / 2;
+      const center = weightedVisualCenter(points);
+      const cx = center.x;
+      const cy = center.y;
       let mm = points.map(p => ({ x: (p.x - cx) * scale, y: -(p.y - cy) * scale }));
       if (polygonArea(mm) < 0) mm.reverse();
       return mm;
     }
+function weightedVisualCenter(points) {
+  const bboxCenter = {
+    x: (Math.min(...points.map(p => p.x)) + Math.max(...points.map(p => p.x))) / 2,
+    y: (Math.min(...points.map(p => p.y)) + Math.max(...points.map(p => p.y))) / 2
+  };
 
+  const centroid = polygonCentroid(points);
+
+  return {
+    x: bboxCenter.x * 0.35 + centroid.x * 0.65,
+    y: bboxCenter.y * 0.35 + centroid.y * 0.65
+  };
+}
+
+function polygonCentroid(points) {
+  let area = 0;
+  let cx = 0;
+  let cy = 0;
+
+  for (let i = 0; i < points.length; i++) {
+    const p1 = points[i];
+    const p2 = points[(i + 1) % points.length];
+
+    const cross = p1.x * p2.y - p2.x * p1.y;
+    area += cross;
+    cx += (p1.x + p2.x) * cross;
+    cy += (p1.y + p2.y) * cross;
+  }
+
+  area *= 0.5;
+
+  if (Math.abs(area) < 0.00001) {
+    return bboxCenterFallback(points);
+  }
+
+  return {
+    x: cx / (6 * area),
+    y: cy / (6 * area)
+  };
+}
+
+function bboxCenterFallback(points) {
+  return {
+    x: (Math.min(...points.map(p => p.x)) + Math.max(...points.map(p => p.x))) / 2,
+    y: (Math.min(...points.map(p => p.y)) + Math.max(...points.map(p => p.y))) / 2
+  };
+}
     function polygonArea(poly) {
       let area = 0;
       for (let i = 0; i < poly.length; i++) {
