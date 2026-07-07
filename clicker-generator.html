@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Clicker Generator</title>
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #111827;
+      color: white;
+      margin: 0;
+      padding: 32px;
+    }
+
+    h1 {
+      margin-top: 0;
+      font-size: 40px;
+    }
+
+    .panel {
+      background: #1f2937;
+      border: 1px solid #374151;
+      border-radius: 12px;
+      padding: 20px;
+      max-width: 1100px;
+    }
+
+    .controls {
+      margin-top: 20px;
+      display: grid;
+      gap: 16px;
+      max-width: 600px;
+    }
+
+    label {
+      font-weight: bold;
+    }
+
+    input[type="file"],
+    input[type="range"],
+    button {
+      font-size: 16px;
+      margin-top: 6px;
+    }
+
+    button {
+      padding: 10px 14px;
+      border: none;
+      border-radius: 8px;
+      background: #2563eb;
+      color: white;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #1d4ed8;
+    }
+
+    .canvas-row {
+      margin-top: 24px;
+      display: flex;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+
+    .canvas-card {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 12px;
+    }
+
+    canvas {
+      background: white;
+      border-radius: 8px;
+      max-width: 100%;
+    }
+
+    .note {
+      color: #cbd5e1;
+      line-height: 1.5;
+    }
+
+    .value {
+      color: #93c5fd;
+      font-weight: normal;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="panel">
+    <h1>Clicker Generator</h1>
+
+    <p class="note">
+      Upload a simple image. This version detects the whole visible object, merges nearby parts,
+      and previews a matching clicker shape.
+    </p>
+
+    <div class="controls">
+      <div>
+        <label for="imageInput">Upload image</label><br />
+        <input type="file" id="imageInput" accept="image/*" />
+      </div>
+
+      <div>
+        <label for="thresholdSlider">
+          Background sensitivity:
+          <span id="thresholdValue" class="value">35</span>
+        </label><br />
+        <input type="range" id="thresholdSlider" min="5" max="160" value="35" />
+      </div>
+
+      <div>
+        <label for="mergeSlider">
+          Merge nearby pieces:
+          <span id="mergeValue" class="value">12</span>
+        </label><br />
+        <input type="range" id="mergeSlider" min="0" max="35" value="12" />
+      </div>
+
+      <div>
+        <label for="smoothSlider">
+          Outline smoothing:
+          <span id="smoothValue" class="value">4</span>
+        </label><br />
+        <input type="range" id="smoothSlider" min="0" max="20" value="4" />
+      </div>
+
+      <button id="traceButton">Trace Silhouette</button>
+
+      <p id="statusText" class="note">Waiting for image...</p>
+    </div>
+
+    <div class="canvas-row">
+      <div class="canvas-card">
+        <h3>Original</h3>
+        <canvas id="sourceCanvas" width="500" height="500"></canvas>
+      </div>
+
+      <div class="canvas-card">
+        <h3>Detected Clicker Shape</h3>
+        <canvas id="previewCanvas" width="500" height="500"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const imageInput = document.getElementById("imageInput");
+    const traceButton = document.getElementById("traceButton");
+
+    const thresholdSlider = document.getElementById("thresholdSlider");
+    const mergeSlider = document.getElementById("mergeSlider");
+    const smoothSlider = document.getElementById("smoothSlider");
+
+    const thresholdValue = document.getElementById("thresholdValue");
+    const mergeValue = document.getElementById("mergeValue");
+    const smoothValue = document.getElementById("smoothValue");
+
+    const sourceCanvas = document.getElementById("sourceCanvas");
+    const sourceCtx = sourceCanvas.getContext("2d", { willReadFrequently: true });
+
+    const previewCanvas = document.getElementById("previewCanvas");
+    const previewCtx = previewCanvas.getContext("2d");
+
+    const statusText = document.getElementById("statusText");
+
+    let loadedImage = null;
+
+    thresholdSlider.addEventListener("input", () => {
+      thresholdValue.textContent = thresholdSlider.value;
+      retraceIfImageLoaded();
+    });
+
+    mergeSlider.addEventListener("input", () => {
+      mergeValue.textContent = mergeSlider.value;
+      retraceIfImageLoaded();
+    });
+
+    smoothSlider.addEventListener("input", () => {
+      smoothValue.textContent = smoothSlider.value;
+      retraceIfImageLoaded();
+    });
+
+    imageInput.addEventListener("change", () => {
+      const file = imageInput.files[0];
+      if (!file) return;
+
+      const img = new Image();
+
+      img.onload = () => {
+        loadedImage = img;
+        retraceIfImageLoaded();
+      };
+
+      img.src = URL.createObjectURL(file);
+    });
+
+    traceButton.addEventListener("click", retraceIfImageLoaded);
+
+    function retraceIfImageLoaded() {
+      if (!loadedImage) return;
+
+      statusText.textContent = "Tracing image...";
+
+      drawImageToSourceCanvas();
+
+      const mask = createForegroundMask();
+
+      const mergeAmount = Number(mergeSlider.value);
+      const mergedMask = closeMask(mask, mergeAmount);
+
+      const component = getLargestComponent(mergedMask.data, mergedMask.width, mergedMask.height);
+
+      if (!component || component.pixels.length < 50) {
+        clearPreview();
+        statusText.textContent = "No clear outline found. Try increasing background sensitivity.";
+        return;
+      }
+
+      const outline = traceComponentBoundary(component, mergedMask.width, mergedMask.height);
+
+      if (outline.length < 10) {
+        clearPreview();
+        statusText.textContent = "Could not trace a usable outline.";
+        return;
+      }
+
+      const simplified = simplifyRadialOutline(outline, 180);
+      const smoothed = smoothOutline(simplified, Number(smoothSlider.value));
+
+      drawClickerPreview(smoothed);
+      statusText.textContent = "Trace complete.";
+    }
+
+    function drawImageToSourceCanvas() {
+      sourceCtx.clearRect(0, 0, sourceCanvas.width, sourceCanvas.height);
+
+      const padding = 40;
+      const maxW = sourceCanvas.width - padding * 2;
+      const maxH = sourceCanvas.height - padding * 2;
+
+      const scale = Math.min(
+        maxW / loadedImage.width,
+        maxH / loadedImage.height
+      );
+
+      const w = loadedImage.width * scale;
+      const h = loadedImage.height * scale;
+      const x = (sourceCanvas.width - w) / 2;
+      const y = (sourceCanvas.height - h) / 2;
+
+      sourceCtx.fillStyle = "white";
+      sourceCtx.fillRect(0, 0, sourceCanvas.width, sourceCanvas.height);
+      sourceCtx.drawImage(loadedImage, x, y, w, h);
+    }
+
+    function clearPreview() {
+      previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+      previewCtx.fillStyle = "white";
+      previewCtx.fillRect(0, 0, previewCanvas.width, previewCanvas.height);
+    }
+
+    function createForegroundMask() {
+      const width = sourceCanvas.width;
+      const height = sourceCanvas.height;
+      const imageData = sourceCtx.getImageData(0, 0, width, height);
+      const data = imageData.data;
+
+      const threshold = Number(thresholdSlider.value);
+      const mask = new Uint8Array(width * height);
+
+      const bg = estimateBackgroundColor(data, width, height);
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const i = (y * width + x) * 4;
+
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          const a = data[i + 3];
+
+          const diff = Math.sqrt(
+            Math.pow(r - bg.r, 2) +
+            Math.pow(g - bg.g, 2) +
+            Math.pow(b - bg.b, 2)
+          );
+
+          const isTransparent = a < 20;
+          const isForeground = !isTransparent && diff > threshold;
+
+          mask[y * width + x] = isForeground ? 1 : 0;
+        }
+      }
+
+      return { data: mask, width, height };
+    }
+
+    function estimateBackgroundColor(data, width, height) {
+      const samples = [];
+
+      const samplePoints = [
+        [5, 5],
+        [width - 6, 5],
+        [5, height - 6],
+        [width - 6, height - 6],
+        [width / 2, 5],
+        [width / 2, height - 6],
+        [5, height / 2],
+        [width - 6, height / 2]
+      ];
+
+      for (const [xRaw, yRaw] of samplePoints) {
+        const x = Math.floor(xRaw);
+        const y = Math.floor(yRaw);
+        const i = (y * width + x) * 4;
+
+        samples.push({
+          r: data[i],
+          g: data[i + 1],
+          b: data[i + 2]
+        });
+      }
+
+      return {
+        r: Math.round(samples.reduce((sum, p) => sum + p.r, 0) / samples.length),
+        g: Math.round(samples.reduce((sum, p) => sum + p.g, 0) / samples.length),
+        b: Math.round(samples.reduce((sum, p) => sum + p.b, 0) / samples.length)
+      };
+    }
+
+    function closeMask(mask, radius) {
+      if (radius <= 0) return mask;
+
+      let dilated = dilate(mask, radius);
+      let closed = erode(dilated, Math.max(1, Math.floor(radius * 0.55)));
+
+      return closed;
+    }
+
+    function dilate(mask, radius) {
+      const { data, width, height } = mask;
+      const output = new Uint8Array(width * height);
+
+      const r2 = radius * radius;
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          let found = false;
+
+          for (let dy = -radius; dy <= radius && !found; dy++) {
+            for (let dx = -radius; dx <= radius; dx++) {
+              if (dx * dx + dy * dy > r2) continue;
+
+              const nx = x + dx;
+              const ny = y + dy;
+
+              if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+
+              if (data[ny * width + nx]) {
+                found = true;
+                break;
+              }
+            }
+          }
+
+          output[y * width + x] = found ? 1 : 0;
+        }
+      }
+
+      return { data: output, width, height };
+    }
+
+    function erode(mask, radius) {
+      const { data, width, height } = mask;
+      const output = new Uint8Array(width * height);
+
+      const r2 = radius * radius;
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          let all = true;
+
+          for (let dy = -radius; dy <= radius && all; dy++) {
+            for (let dx = -radius; dx <= radius; dx++) {
+              if (dx * dx + dy * dy > r2) continue;
+
+              const nx = x + dx;
+              const ny = y + dy;
+
+              if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+                all = false;
+                break;
+              }
+
+              if (!data[ny * width + nx]) {
+                all = false;
+                break;
+              }
+            }
+          }
+
+          output[y * width + x] = all ? 1 : 0;
+        }
+      }
+
+      return { data: output, width, height };
+    }
+
+    function getLargestComponent(data, width, height) {
+      const visited = new Uint8Array(width * height);
+      let bestPixels = [];
+
+      const directions = [
+        [-1, 0],
+        [1, 0],
+        [0, -1],
+        [0, 1]
+      ];
+
+      for (let y = 1; y < height - 1; y++) {
+        for (let x = 1; x < width - 1; x++) {
+          const startIndex = y * width + x;
+
+          if (visited[startIndex] || data[startIndex] === 0) continue;
+
+          const queue = [startIndex];
+          const pixels = [];
+          visited[startIndex] = 1;
+
+          while (queue.length > 0) {
+            const index = queue.pop();
+            pixels.push(index);
+
+            const px = index % width;
+            const py = Math.floor(index / width);
+
+            for (const [dx, dy] of directions) {
+              const nx = px + dx;
+              const ny = py + dy;
+              const nIndex = ny * width + nx;
+
+              if (
+                nx <= 0 ||
+                nx >= width - 1 ||
+                ny <= 0 ||
+                ny >= height - 1 ||
+                visited[nIndex] ||
+                data[nIndex] === 0
+              ) {
+                continue;
+              }
+
+              visited[nIndex] = 1;
+              queue.push(nIndex);
+            }
+          }
+
+          if (pixels.length > bestPixels.length) {
+            bestPixels = pixels;
+          }
+        }
+      }
+
+      return {
+        pixels: bestPixels,
+        set: new Set(bestPixels)
+      };
+    }
+
+    function traceComponentBoundary(component, width, height) {
+      const boundary = [];
+
+      for (const index of component.pixels) {
+        const x = index % width;
+        const y = Math.floor(index / width);
+
+        const hasBackgroundNeighbor =
+          !component.set.has(index - 1) ||
+          !component.set.has(index + 1) ||
+          !component.set.has(index - width) ||
+          !component.set.has(index + width);
+
+        if (hasBackgroundNeighbor) {
+          boundary.push({ x, y });
+        }
+      }
+
+      return boundary;
+    }
+
+    function simplifyRadialOutline(points, binCount) {
+      const cx = points.reduce((sum, p) => sum + p.x, 0) / points.length;
+      const cy = points.reduce((sum, p) => sum + p.y, 0) / points.length;
+
+      const bins = new Array(binCount).fill(null);
+
+      for (const p of points) {
+        const angle = Math.atan2(p.y - cy, p.x - cx);
+        const normalized = angle < 0 ? angle + Math.PI * 2 : angle;
+        const bin = Math.floor((normalized / (Math.PI * 2)) * binCount);
+
+        const distance = Math.hypot(p.x - cx, p.y - cy);
+
+        if (!bins[bin] || distance > bins[bin].distance) {
+          bins[bin] = {
+            x: p.x,
+            y: p.y,
+            distance
+          };
+        }
+      }
+
+      return bins
+        .filter(Boolean)
+        .map(p => ({ x: p.x, y: p.y }));
+    }
+
+    function smoothOutline(points, amount) {
+      if (points.length < 3 || amount <= 0) return points;
+
+      let smoothed = points.map(p => ({ ...p }));
+
+      for (let pass = 0; pass < amount; pass++) {
+        smoothed = smoothed.map((point, i) => {
+          const prev = smoothed[(i - 1 + smoothed.length) % smoothed.length];
+          const next = smoothed[(i + 1) % smoothed.length];
+
+          return {
+            x: (prev.x + point.x * 2 + next.x) / 4,
+            y: (prev.y + point.y * 2 + next.y) / 4
+          };
+        });
+      }
+
+      return smoothed;
+    }
+
+    function drawClickerPreview(points) {
+      clearPreview();
+
+      const fitted = fitPointsToCanvas(points, previewCanvas.width, previewCanvas.height, 70);
+
+      drawShape(previewCtx, fitted, {
+        fill: "#9ca3af",
+        stroke: "#4b5563",
+        lineWidth: 8,
+        offsetX: 10,
+        offsetY: 16
+      });
+
+      drawShape(previewCtx, fitted, {
+        fill: "#2563eb",
+        stroke: "#1e40af",
+        lineWidth: 5,
+        offsetX: 0,
+        offsetY: 0
+      });
+
+      drawShape(previewCtx, scaleAroundCenter(fitted, 0.78), {
+        fill: "transparent",
+        stroke: "white",
+        lineWidth: 5,
+        offsetX: 0,
+        offsetY: 0
+      });
+
+      previewCtx.fillStyle = "#111827";
+      previewCtx.font = "bold 18px Arial";
+      previewCtx.textAlign = "center";
+      previewCtx.fillText("Shape preview only — STL export comes next", previewCanvas.width / 2, 470);
+    }
+
+    function fitPointsToCanvas(points, width, height, padding) {
+      const minX = Math.min(...points.map(p => p.x));
+      const maxX = Math.max(...points.map(p => p.x));
+      const minY = Math.min(...points.map(p => p.y));
+      const maxY = Math.max(...points.map(p => p.y));
+
+      const shapeW = maxX - minX;
+      const shapeH = maxY - minY;
+
+      const scale = Math.min(
+        (width - padding * 2) / shapeW,
+        (height - padding * 2) / shapeH
+      );
+
+      return points.map(p => ({
+        x: (p.x - minX - shapeW / 2) * scale + width / 2,
+        y: (p.y - minY - shapeH / 2) * scale + height / 2
+      }));
+    }
+
+    function scaleAroundCenter(points, scale) {
+      const cx = points.reduce((sum, p) => sum + p.x, 0) / points.length;
+      const cy = points.reduce((sum, p) => sum + p.y, 0) / points.length;
+
+      return points.map(p => ({
+        x: cx + (p.x - cx) * scale,
+        y: cy + (p.y - cy) * scale
+      }));
+    }
+
+    function drawShape(ctx, points, options) {
+      const offsetX = options.offsetX || 0;
+      const offsetY = options.offsetY || 0;
+
+      ctx.beginPath();
+      ctx.moveTo(points[0].x + offsetX, points[0].y + offsetY);
+
+      for (let i = 1; i < points.length; i++) {
+        ctx.lineTo(points[i].x + offsetX, points[i].y + offsetY);
+      }
+
+      ctx.closePath();
+
+      if (options.fill && options.fill !== "transparent") {
+        ctx.fillStyle = options.fill;
+        ctx.fill();
+      }
+
+      if (options.stroke) {
+        ctx.strokeStyle = options.stroke;
+        ctx.lineWidth = options.lineWidth || 2;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        ctx.stroke();
+      }
+    }
+  </script>
+</body>
+</html>
