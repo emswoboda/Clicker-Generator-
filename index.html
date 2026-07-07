@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <title>Clicker Generator</title>
+  <link rel="icon" href="data:,">
+  <script src="https://cdn.jsdelivr.net/npm/earcut@2.2.4/dist/earcut.min.js"></script>
 
   <style>
     body {
@@ -130,6 +132,8 @@
       </div>
 
       <button id="traceButton">Trace Silhouette</button>
+      <button id="exportCapButton">Download Cap STL</button>
+      <button id="exportBaseButton">Download Base STL</button>
 
       <p id="statusText" class="note">Waiting for image...</p>
     </div>
@@ -150,6 +154,8 @@
   <script>
     const imageInput = document.getElementById("imageInput");
     const traceButton = document.getElementById("traceButton");
+    const exportCapButton = document.getElementById("exportCapButton");
+    const exportBaseButton = document.getElementById("exportBaseButton");
 
     const thresholdSlider = document.getElementById("thresholdSlider");
     const mergeSlider = document.getElementById("mergeSlider");
@@ -168,6 +174,7 @@
     const statusText = document.getElementById("statusText");
 
     let loadedImage = null;
+    let currentOutlinePoints = null;
 
     thresholdSlider.addEventListener("input", () => {
       thresholdValue.textContent = thresholdSlider.value;
@@ -200,6 +207,24 @@
 
     traceButton.addEventListener("click", retraceIfImageLoaded);
 
+    exportCapButton.addEventListener("click", () => {
+      if (!currentOutlinePoints) {
+        alert("Trace an image first.");
+        return;
+      }
+      const stl = makeCapSTL(currentOutlinePoints);
+      downloadTextFile(stl, "custom_clicker_cap.stl", "model/stl");
+    });
+
+    exportBaseButton.addEventListener("click", () => {
+      if (!currentOutlinePoints) {
+        alert("Trace an image first.");
+        return;
+      }
+      const stl = makeBaseSTL(currentOutlinePoints);
+      downloadTextFile(stl, "custom_clicker_base.stl", "model/stl");
+    });
+
     function retraceIfImageLoaded() {
       if (!loadedImage) return;
 
@@ -230,6 +255,7 @@
 
       const simplified = simplifyRadialOutline(outline, 180);
       const smoothed = smoothOutline(simplified, Number(smoothSlider.value));
+      currentOutlinePoints = smoothed;
 
       drawClickerPreview(smoothed);
       statusText.textContent = "Trace complete.";
@@ -630,6 +656,236 @@
         ctx.stroke();
       }
     }
+  
+
+    // ---------- STL EXPORT ----------
+    // First functional STL export. This exports separate cap/base STL files from the traced outline.
+    // It uses the tested switch/socket dimensions from the OpenSCAD clicker.
+    const CLICKER = {
+      capMaxSize: 40,
+      baseMaxSize: 50,
+      capTotalHeight: 12,
+      capInnerCavityDiameter: 20,
+      capInnerCavityDepth: 3.8,
+      socketPostHeight: 3.8,
+      socketPostRadius: 2.8,
+      socketCrossLength: 4.276,
+      socketCrossWidth: 1.3,
+      baseHeight: 18,
+      baseTopIndentDepth: 6,
+      baseTopIndentClearance: 1,
+      switchTopSquareSize: 16,
+      switchTopSquareDepth: 3,
+      switchStepInset: 1,
+      switchLowerSquareDepth: 5,
+      switchCenterCircleDiameter: 5,
+      switchCenterCircleDepth: 3.4
+    };
+
+    function makeCapSTL(canvasPoints) {
+      const capShape = pointsToMillimeters(canvasPoints, CLICKER.capMaxSize);
+      const rCavity = CLICKER.capInnerCavityDiameter / 2;
+      const rPost = CLICKER.socketPostRadius;
+      let triangles = [];
+
+      // Lower cap shell: custom outside with circular underside cavity.
+      triangles.push(...extrudePolygonWithHoles(capShape, [makeCircle(rCavity, 80)], 0, CLICKER.capInnerCavityDepth));
+
+      // Upper cap body: solid custom shape.
+      triangles.push(...extrudePolygonWithHoles(capShape, [], CLICKER.capInnerCavityDepth, CLICKER.capTotalHeight));
+
+      // MX socket post with cross cutout.
+      triangles.push(...extrudePolygonWithHoles(
+        makeCircle(rPost, 64),
+        [makeCrossPolygon(CLICKER.socketCrossLength + 0.10, CLICKER.socketCrossWidth + 0.10)],
+        0,
+        CLICKER.socketPostHeight
+      ));
+
+      return trianglesToAsciiSTL(triangles, "custom_clicker_cap");
+    }
+
+    function makeBaseSTL(canvasPoints) {
+      const capShape = pointsToMillimeters(canvasPoints, CLICKER.capMaxSize);
+      const baseShape = pointsToMillimeters(canvasPoints, CLICKER.baseMaxSize);
+      const indentShape = scalePolygon(capShape, (CLICKER.capMaxSize + CLICKER.baseTopIndentClearance) / CLICKER.capMaxSize);
+      const midZ = CLICKER.baseHeight - CLICKER.baseTopIndentDepth;
+      const lowerSquare = CLICKER.switchTopSquareSize - CLICKER.switchStepInset * 2;
+      const circleBottomZ = Math.max(0.6, midZ - CLICKER.switchTopSquareDepth - CLICKER.switchLowerSquareDepth - CLICKER.switchCenterCircleDepth);
+      let triangles = [];
+
+      // Bottom skin under center circle indent.
+      triangles.push(...extrudePolygonWithHoles(baseShape, [], 0, circleBottomZ));
+
+      // Center circular indent.
+      triangles.push(...extrudePolygonWithHoles(
+        baseShape,
+        [makeCircle(CLICKER.switchCenterCircleDiameter / 2, 64)],
+        circleBottomZ,
+        midZ - CLICKER.switchTopSquareDepth - CLICKER.switchLowerSquareDepth
+      ));
+
+      // Lower square switch pocket.
+      triangles.push(...extrudePolygonWithHoles(
+        baseShape,
+        [makeSquare(lowerSquare)],
+        midZ - CLICKER.switchTopSquareDepth - CLICKER.switchLowerSquareDepth,
+        midZ - CLICKER.switchTopSquareDepth
+      ));
+
+      // Top square switch pocket.
+      triangles.push(...extrudePolygonWithHoles(
+        baseShape,
+        [makeSquare(CLICKER.switchTopSquareSize)],
+        midZ - CLICKER.switchTopSquareDepth,
+        midZ
+      ));
+
+      // Top matching cap indent/rim.
+      triangles.push(...extrudePolygonWithHoles(baseShape, [indentShape], midZ, CLICKER.baseHeight));
+
+      return trianglesToAsciiSTL(triangles, "custom_clicker_base");
+    }
+
+    function pointsToMillimeters(points, targetMaxSize) {
+      const minX = Math.min(...points.map(p => p.x));
+      const maxX = Math.max(...points.map(p => p.x));
+      const minY = Math.min(...points.map(p => p.y));
+      const maxY = Math.max(...points.map(p => p.y));
+      const w = maxX - minX;
+      const h = maxY - minY;
+      const scale = targetMaxSize / Math.max(w, h);
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      let mm = points.map(p => ({ x: (p.x - cx) * scale, y: -(p.y - cy) * scale }));
+      if (polygonArea(mm) < 0) mm.reverse();
+      return mm;
+    }
+
+    function polygonArea(poly) {
+      let area = 0;
+      for (let i = 0; i < poly.length; i++) {
+        const a = poly[i];
+        const b = poly[(i + 1) % poly.length];
+        area += a.x * b.y - b.x * a.y;
+      }
+      return area / 2;
+    }
+
+    function scalePolygon(poly, scale) {
+      const cx = poly.reduce((sum, p) => sum + p.x, 0) / poly.length;
+      const cy = poly.reduce((sum, p) => sum + p.y, 0) / poly.length;
+      return poly.map(p => ({ x: cx + (p.x - cx) * scale, y: cy + (p.y - cy) * scale }));
+    }
+
+    function makeCircle(radius, segments) {
+      const points = [];
+      for (let i = 0; i < segments; i++) {
+        const a = (Math.PI * 2 * i) / segments;
+        points.push({ x: Math.cos(a) * radius, y: Math.sin(a) * radius });
+      }
+      return points;
+    }
+
+    function makeSquare(size) {
+      const s = size / 2;
+      return [{x:-s,y:-s},{x:s,y:-s},{x:s,y:s},{x:-s,y:s}];
+    }
+
+    function makeCrossPolygon(crossLength, crossWidth) {
+      const L = crossLength / 2;
+      const W = crossWidth / 2;
+      return [
+        {x:-W,y:-L},{x:W,y:-L},{x:W,y:-W},{x:L,y:-W},
+        {x:L,y:W},{x:W,y:W},{x:W,y:L},{x:-W,y:L},
+        {x:-W,y:W},{x:-L,y:W},{x:-L,y:-W},{x:-W,y:-W}
+      ];
+    }
+
+    function extrudePolygonWithHoles(outer, holes, z0, z1) {
+      if (!outer || outer.length < 3 || z1 <= z0) return [];
+      let vertices2d = [];
+      let flat = [];
+      let holeIndices = [];
+      const addLoop = (loop) => {
+        for (const p of loop) {
+          vertices2d.push(p);
+          flat.push(p.x, p.y);
+        }
+      };
+      addLoop(outer);
+      for (const hole of holes) {
+        holeIndices.push(vertices2d.length);
+        addLoop([...hole].reverse());
+      }
+      if (typeof earcut !== "function") {
+        alert("STL export library did not load. Check internet connection or CDN access.");
+        return [];
+      }
+      const indices = earcut(flat, holeIndices);
+      let triangles = [];
+      for (let i = 0; i < indices.length; i += 3) {
+        triangles.push([to3(vertices2d[indices[i]], z1), to3(vertices2d[indices[i+1]], z1), to3(vertices2d[indices[i+2]], z1)]);
+        triangles.push([to3(vertices2d[indices[i+2]], z0), to3(vertices2d[indices[i+1]], z0), to3(vertices2d[indices[i]], z0)]);
+      }
+      triangles.push(...wallTriangles(outer, z0, z1, false));
+      for (const hole of holes) triangles.push(...wallTriangles(hole, z0, z1, true));
+      return triangles;
+    }
+
+    function to3(p, z) { return {x:p.x, y:p.y, z}; }
+
+    function wallTriangles(poly, z0, z1, reverse) {
+      const triangles = [];
+      for (let i = 0; i < poly.length; i++) {
+        const a = poly[i];
+        const b = poly[(i + 1) % poly.length];
+        const a0 = to3(a,z0), b0 = to3(b,z0), a1 = to3(a,z1), b1 = to3(b,z1);
+        if (!reverse) {
+          triangles.push([a0,b0,b1]);
+          triangles.push([a0,b1,a1]);
+        } else {
+          triangles.push([a0,b1,b0]);
+          triangles.push([a0,a1,b1]);
+        }
+      }
+      return triangles;
+    }
+
+    function trianglesToAsciiSTL(triangles, name) {
+      let out = `solid ${name}\n`;
+      for (const tri of triangles) {
+        const n = normalForTriangle(tri[0], tri[1], tri[2]);
+        out += `  facet normal ${n.x} ${n.y} ${n.z}\n`;
+        out += `    outer loop\n`;
+        for (const p of tri) out += `      vertex ${p.x.toFixed(5)} ${p.y.toFixed(5)} ${p.z.toFixed(5)}\n`;
+        out += `    endloop\n`;
+        out += `  endfacet\n`;
+      }
+      out += `endsolid ${name}\n`;
+      return out;
+    }
+
+    function normalForTriangle(a,b,c) {
+      const ux=b.x-a.x, uy=b.y-a.y, uz=b.z-a.z;
+      const vx=c.x-a.x, vy=c.y-a.y, vz=c.z-a.z;
+      let nx=uy*vz-uz*vy, ny=uz*vx-ux*vz, nz=ux*vy-uy*vx;
+      const len=Math.hypot(nx,ny,nz)||1;
+      return {x:(nx/len).toFixed(6), y:(ny/len).toFixed(6), z:(nz/len).toFixed(6)};
+    }
+
+    function downloadTextFile(text, filename, mimeType) {
+      const blob = new Blob([text], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
   </script>
 </body>
 </html>
