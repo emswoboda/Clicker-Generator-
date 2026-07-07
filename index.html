@@ -23,14 +23,14 @@
       border: 1px solid #374151;
       border-radius: 12px;
       padding: 20px;
-      max-width: 1000px;
+      max-width: 1100px;
     }
 
     .controls {
       margin-top: 20px;
       display: grid;
       gap: 16px;
-      max-width: 500px;
+      max-width: 600px;
     }
 
     label {
@@ -95,8 +95,8 @@
     <h1>Clicker Generator</h1>
 
     <p class="note">
-      Upload a simple image. This version detects the outside silhouette and previews a matching clicker shape.
-      Use simple images with a clear outline for best results.
+      Upload a simple image. This version detects the whole visible object, merges nearby parts,
+      and previews a matching clicker shape.
     </p>
 
     <div class="controls">
@@ -110,18 +110,28 @@
           Background sensitivity:
           <span id="thresholdValue" class="value">35</span>
         </label><br />
-        <input type="range" id="thresholdSlider" min="5" max="120" value="35" />
+        <input type="range" id="thresholdSlider" min="5" max="160" value="35" />
+      </div>
+
+      <div>
+        <label for="mergeSlider">
+          Merge nearby pieces:
+          <span id="mergeValue" class="value">12</span>
+        </label><br />
+        <input type="range" id="mergeSlider" min="0" max="35" value="12" />
       </div>
 
       <div>
         <label for="smoothSlider">
           Outline smoothing:
-          <span id="smoothValue" class="value">8</span>
+          <span id="smoothValue" class="value">4</span>
         </label><br />
-        <input type="range" id="smoothSlider" min="1" max="30" value="8" />
+        <input type="range" id="smoothSlider" min="0" max="20" value="4" />
       </div>
 
       <button id="traceButton">Trace Silhouette</button>
+
+      <p id="statusText" class="note">Waiting for image...</p>
     </div>
 
     <div class="canvas-row">
@@ -133,7 +143,6 @@
       <div class="canvas-card">
         <h3>Detected Clicker Shape</h3>
         <canvas id="previewCanvas" width="500" height="500"></canvas>
-        <p id="statusText" class="note">Waiting for image...</p>
       </div>
     </div>
   </div>
@@ -143,99 +152,88 @@
     const traceButton = document.getElementById("traceButton");
 
     const thresholdSlider = document.getElementById("thresholdSlider");
+    const mergeSlider = document.getElementById("mergeSlider");
     const smoothSlider = document.getElementById("smoothSlider");
 
     const thresholdValue = document.getElementById("thresholdValue");
+    const mergeValue = document.getElementById("mergeValue");
     const smoothValue = document.getElementById("smoothValue");
 
     const sourceCanvas = document.getElementById("sourceCanvas");
     const sourceCtx = sourceCanvas.getContext("2d", { willReadFrequently: true });
-    const statusText = document.getElementById("statusText");
 
     const previewCanvas = document.getElementById("previewCanvas");
     const previewCtx = previewCanvas.getContext("2d");
 
+    const statusText = document.getElementById("statusText");
+
     let loadedImage = null;
 
     thresholdSlider.addEventListener("input", () => {
-  thresholdValue.textContent = thresholdSlider.value;
-  retraceIfImageLoaded();
-});
+      thresholdValue.textContent = thresholdSlider.value;
+      retraceIfImageLoaded();
+    });
 
-smoothSlider.addEventListener("input", () => {
-  smoothValue.textContent = smoothSlider.value;
-  retraceIfImageLoaded();
-});
+    mergeSlider.addEventListener("input", () => {
+      mergeValue.textContent = mergeSlider.value;
+      retraceIfImageLoaded();
+    });
 
-function retraceIfImageLoaded() {
-  if (!loadedImage) return;
+    smoothSlider.addEventListener("input", () => {
+      smoothValue.textContent = smoothSlider.value;
+      retraceIfImageLoaded();
+    });
 
-  drawImageToSourceCanvas();
-
-  const mask = createForegroundMask();
-  const outline = traceOuterSilhouette(mask);
-
-  if (outline.length < 10) {
-    clearPreview();
-    return;
-  }
-
-  const smoothed = smoothOutline(outline, Number(smoothSlider.value));
-  drawClickerPreview(smoothed);
-}
     imageInput.addEventListener("change", () => {
-  const file = imageInput.files[0];
-  if (!file) return;
+      const file = imageInput.files[0];
+      if (!file) return;
 
-  const img = new Image();
+      const img = new Image();
 
-  img.onload = () => {
-    statusText.textContent = "Image loaded. Tracing...";
-    loadedImage = img;
-    drawImageToSourceCanvas();
+      img.onload = () => {
+        loadedImage = img;
+        retraceIfImageLoaded();
+      };
 
-    const mask = createForegroundMask();
-    const outline = traceOuterSilhouette(mask);
+      img.src = URL.createObjectURL(file);
+    });
 
- if (outline.length < 10) {
-  clearPreview();
+    traceButton.addEventListener("click", retraceIfImageLoaded);
 
-  statusText.textContent = "No clear outline found. Try changing sensitivity.";
+    function retraceIfImageLoaded() {
+      if (!loadedImage) return;
 
-  previewCtx.fillStyle = "#111827";
-  previewCtx.font = "bold 18px Arial";
-  previewCtx.textAlign = "center";
-  previewCtx.fillText("Could not find a clear outline.", previewCanvas.width / 2, 240);
-  previewCtx.fillText("Try a simpler image or adjust sensitivity.", previewCanvas.width / 2, 270);
-
-  return;
-}
-
-    const smoothed = smoothOutline(outline, Number(smoothSlider.value));
-    drawClickerPreview(smoothed);
-    statusText.textContent = "Trace complete.";
-  };
-
-  img.src = URL.createObjectURL(file);
-});
-    traceButton.addEventListener("click", () => {
-      if (!loadedImage) {
-        alert("Upload an image first.");
-        return;
-      }
+      statusText.textContent = "Tracing image...";
 
       drawImageToSourceCanvas();
-      const mask = createForegroundMask();
-      const outline = traceOuterSilhouette(mask);
 
-      if (outline.length < 10) {
-        alert("Could not find a clear outline. Try a simpler image or adjust background sensitivity.");
+      const mask = createForegroundMask();
+
+      const mergeAmount = Number(mergeSlider.value);
+      const mergedMask = closeMask(mask, mergeAmount);
+
+      const component = getLargestComponent(mergedMask.data, mergedMask.width, mergedMask.height);
+
+      if (!component || component.pixels.length < 50) {
+        clearPreview();
+        statusText.textContent = "No clear outline found. Try increasing background sensitivity.";
         return;
       }
 
-      const smoothed = smoothOutline(outline, Number(smoothSlider.value));
+      const outline = traceComponentBoundary(component, mergedMask.width, mergedMask.height);
+
+      if (outline.length < 10) {
+        clearPreview();
+        statusText.textContent = "Could not trace a usable outline.";
+        return;
+      }
+
+      const simplified = simplifyRadialOutline(outline, 180);
+      const smoothed = smoothOutline(simplified, Number(smoothSlider.value));
+
       drawClickerPreview(smoothed);
-    });
+      statusText.textContent = "Trace complete.";
+    }
 
     function drawImageToSourceCanvas() {
       sourceCtx.clearRect(0, 0, sourceCanvas.width, sourceCanvas.height);
@@ -274,19 +272,7 @@ function retraceIfImageLoaded() {
       const threshold = Number(thresholdSlider.value);
       const mask = new Uint8Array(width * height);
 
-      // Estimate background from the four corners.
-      const corners = [
-        getPixel(data, width, 5, 5),
-        getPixel(data, width, width - 6, 5),
-        getPixel(data, width, 5, height - 6),
-        getPixel(data, width, width - 6, height - 6)
-      ];
-
-      const bg = {
-        r: Math.round(corners.reduce((sum, p) => sum + p.r, 0) / corners.length),
-        g: Math.round(corners.reduce((sum, p) => sum + p.g, 0) / corners.length),
-        b: Math.round(corners.reduce((sum, p) => sum + p.b, 0) / corners.length)
-      };
+      const bg = estimateBackgroundColor(data, width, height);
 
       for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
@@ -310,168 +296,238 @@ function retraceIfImageLoaded() {
         }
       }
 
+      return { data: mask, width, height };
+    }
+
+    function estimateBackgroundColor(data, width, height) {
+      const samples = [];
+
+      const samplePoints = [
+        [5, 5],
+        [width - 6, 5],
+        [5, height - 6],
+        [width - 6, height - 6],
+        [width / 2, 5],
+        [width / 2, height - 6],
+        [5, height / 2],
+        [width - 6, height / 2]
+      ];
+
+      for (const [xRaw, yRaw] of samplePoints) {
+        const x = Math.floor(xRaw);
+        const y = Math.floor(yRaw);
+        const i = (y * width + x) * 4;
+
+        samples.push({
+          r: data[i],
+          g: data[i + 1],
+          b: data[i + 2]
+        });
+      }
+
       return {
-        data: mask,
-        width,
-        height
+        r: Math.round(samples.reduce((sum, p) => sum + p.r, 0) / samples.length),
+        g: Math.round(samples.reduce((sum, p) => sum + p.g, 0) / samples.length),
+        b: Math.round(samples.reduce((sum, p) => sum + p.b, 0) / samples.length)
       };
     }
 
-    function getPixel(data, width, x, y) {
-      const i = (y * width + x) * 4;
+    function closeMask(mask, radius) {
+      if (radius <= 0) return mask;
 
-      return {
-        r: data[i],
-        g: data[i + 1],
-        b: data[i + 2]
-      };
+      let dilated = dilate(mask, radius);
+      let closed = erode(dilated, Math.max(1, Math.floor(radius * 0.55)));
+
+      return closed;
     }
 
-function traceOuterSilhouette(mask) {
-  const { data, width, height } = mask;
+    function dilate(mask, radius) {
+      const { data, width, height } = mask;
+      const output = new Uint8Array(width * height);
 
-  // Step 1: keep only the biggest connected foreground blob.
-  const component = getLargestComponent(data, width, height);
+      const r2 = radius * radius;
 
-  if (!component || component.size < 20) {
-    return [];
-  }
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          let found = false;
 
-  // Step 2: collect boundary points from that blob.
-  const boundaryPoints = [];
+          for (let dy = -radius; dy <= radius && !found; dy++) {
+            for (let dx = -radius; dx <= radius; dx++) {
+              if (dx * dx + dy * dy > r2) continue;
 
-  for (const index of component.pixels) {
-    const x = index % width;
-    const y = Math.floor(index / width);
+              const nx = x + dx;
+              const ny = y + dy;
 
-    if (x <= 0 || x >= width - 1 || y <= 0 || y >= height - 1) continue;
+              if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
 
-    const hasBackgroundNeighbor =
-      !component.set.has(index - 1) ||
-      !component.set.has(index + 1) ||
-      !component.set.has(index - width) ||
-      !component.set.has(index + width);
-
-    if (hasBackgroundNeighbor) {
-      boundaryPoints.push({ x, y });
-    }
-  }
-
-  if (boundaryPoints.length < 10) {
-    return [];
-  }
-
-  // Step 3: turn boundary cloud into an ordered outer outline.
-  return radialOuterOutline(boundaryPoints, 360);
-}
-
-function getLargestComponent(data, width, height) {
-  const visited = new Uint8Array(width * height);
-  let bestPixels = [];
-
-  const directions = [
-    [-1, 0],
-    [1, 0],
-    [0, -1],
-    [0, 1]
-  ];
-
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const startIndex = y * width + x;
-
-      if (visited[startIndex] || data[startIndex] === 0) continue;
-
-      const queue = [startIndex];
-      const pixels = [];
-      visited[startIndex] = 1;
-
-      while (queue.length > 0) {
-        const index = queue.pop();
-        pixels.push(index);
-
-        const px = index % width;
-        const py = Math.floor(index / width);
-
-        for (const [dx, dy] of directions) {
-          const nx = px + dx;
-          const ny = py + dy;
-          const nIndex = ny * width + nx;
-
-          if (
-            nx <= 0 ||
-            nx >= width - 1 ||
-            ny <= 0 ||
-            ny >= height - 1 ||
-            visited[nIndex] ||
-            data[nIndex] === 0
-          ) {
-            continue;
+              if (data[ny * width + nx]) {
+                found = true;
+                break;
+              }
+            }
           }
 
-          visited[nIndex] = 1;
-          queue.push(nIndex);
+          output[y * width + x] = found ? 1 : 0;
         }
       }
 
-      if (pixels.length > bestPixels.length) {
-        bestPixels = pixels;
-      }
+      return { data: output, width, height };
     }
-  }
 
-  return {
-    size: bestPixels.length,
-    pixels: bestPixels,
-    set: new Set(bestPixels)
-  };
-}
+    function erode(mask, radius) {
+      const { data, width, height } = mask;
+      const output = new Uint8Array(width * height);
 
-function radialOuterOutline(points, binCount) {
-  const cx = points.reduce((sum, p) => sum + p.x, 0) / points.length;
-  const cy = points.reduce((sum, p) => sum + p.y, 0) / points.length;
+      const r2 = radius * radius;
 
-  const bins = new Array(binCount).fill(null);
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          let all = true;
 
-  for (const p of points) {
-    const angle = Math.atan2(p.y - cy, p.x - cx);
-    const normalized = angle < 0 ? angle + Math.PI * 2 : angle;
-    const bin = Math.floor((normalized / (Math.PI * 2)) * binCount);
+          for (let dy = -radius; dy <= radius && all; dy++) {
+            for (let dx = -radius; dx <= radius; dx++) {
+              if (dx * dx + dy * dy > r2) continue;
 
-    const distance = Math.hypot(p.x - cx, p.y - cy);
+              const nx = x + dx;
+              const ny = y + dy;
 
-    if (!bins[bin] || distance > bins[bin].distance) {
-      bins[bin] = {
-        x: p.x,
-        y: p.y,
-        distance
+              if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+                all = false;
+                break;
+              }
+
+              if (!data[ny * width + nx]) {
+                all = false;
+                break;
+              }
+            }
+          }
+
+          output[y * width + x] = all ? 1 : 0;
+        }
+      }
+
+      return { data: output, width, height };
+    }
+
+    function getLargestComponent(data, width, height) {
+      const visited = new Uint8Array(width * height);
+      let bestPixels = [];
+
+      const directions = [
+        [-1, 0],
+        [1, 0],
+        [0, -1],
+        [0, 1]
+      ];
+
+      for (let y = 1; y < height - 1; y++) {
+        for (let x = 1; x < width - 1; x++) {
+          const startIndex = y * width + x;
+
+          if (visited[startIndex] || data[startIndex] === 0) continue;
+
+          const queue = [startIndex];
+          const pixels = [];
+          visited[startIndex] = 1;
+
+          while (queue.length > 0) {
+            const index = queue.pop();
+            pixels.push(index);
+
+            const px = index % width;
+            const py = Math.floor(index / width);
+
+            for (const [dx, dy] of directions) {
+              const nx = px + dx;
+              const ny = py + dy;
+              const nIndex = ny * width + nx;
+
+              if (
+                nx <= 0 ||
+                nx >= width - 1 ||
+                ny <= 0 ||
+                ny >= height - 1 ||
+                visited[nIndex] ||
+                data[nIndex] === 0
+              ) {
+                continue;
+              }
+
+              visited[nIndex] = 1;
+              queue.push(nIndex);
+            }
+          }
+
+          if (pixels.length > bestPixels.length) {
+            bestPixels = pixels;
+          }
+        }
+      }
+
+      return {
+        pixels: bestPixels,
+        set: new Set(bestPixels)
       };
     }
-  }
 
-  const outline = [];
+    function traceComponentBoundary(component, width, height) {
+      const boundary = [];
 
-  for (const point of bins) {
-    if (point) {
-      outline.push({
-        x: point.x,
-        y: point.y
-      });
+      for (const index of component.pixels) {
+        const x = index % width;
+        const y = Math.floor(index / width);
+
+        const hasBackgroundNeighbor =
+          !component.set.has(index - 1) ||
+          !component.set.has(index + 1) ||
+          !component.set.has(index - width) ||
+          !component.set.has(index + width);
+
+        if (hasBackgroundNeighbor) {
+          boundary.push({ x, y });
+        }
+      }
+
+      return boundary;
     }
-  }
 
-  return outline;
-}
+    function simplifyRadialOutline(points, binCount) {
+      const cx = points.reduce((sum, p) => sum + p.x, 0) / points.length;
+      const cy = points.reduce((sum, p) => sum + p.y, 0) / points.length;
+
+      const bins = new Array(binCount).fill(null);
+
+      for (const p of points) {
+        const angle = Math.atan2(p.y - cy, p.x - cx);
+        const normalized = angle < 0 ? angle + Math.PI * 2 : angle;
+        const bin = Math.floor((normalized / (Math.PI * 2)) * binCount);
+
+        const distance = Math.hypot(p.x - cx, p.y - cy);
+
+        if (!bins[bin] || distance > bins[bin].distance) {
+          bins[bin] = {
+            x: p.x,
+            y: p.y,
+            distance
+          };
+        }
+      }
+
+      return bins
+        .filter(Boolean)
+        .map(p => ({ x: p.x, y: p.y }));
+    }
 
     function smoothOutline(points, amount) {
-      if (points.length < 3) return points;
+      if (points.length < 3 || amount <= 0) return points;
 
       let smoothed = points.map(p => ({ ...p }));
 
       for (let pass = 0; pass < amount; pass++) {
         smoothed = smoothed.map((point, i) => {
           const prev = smoothed[(i - 1 + smoothed.length) % smoothed.length];
-          const next = smoothed[(i + 1) % smoothed.length];
+          const next = smoothed[(i + 1) % smoothed.length;
 
           return {
             x: (prev.x + point.x * 2 + next.x) / 4,
@@ -488,7 +544,6 @@ function radialOuterOutline(points, binCount) {
 
       const fitted = fitPointsToCanvas(points, previewCanvas.width, previewCanvas.height, 70);
 
-      // Base shape.
       drawShape(previewCtx, fitted, {
         fill: "#9ca3af",
         stroke: "#4b5563",
@@ -497,7 +552,6 @@ function radialOuterOutline(points, binCount) {
         offsetY: 16
       });
 
-      // Top cap shape.
       drawShape(previewCtx, fitted, {
         fill: "#2563eb",
         stroke: "#1e40af",
@@ -506,7 +560,6 @@ function radialOuterOutline(points, binCount) {
         offsetY: 0
       });
 
-      // Inner decorative outline.
       drawShape(previewCtx, scaleAroundCenter(fitted, 0.78), {
         fill: "transparent",
         stroke: "white",
