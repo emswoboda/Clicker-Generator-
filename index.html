@@ -156,13 +156,31 @@
     let loadedImage = null;
 
     thresholdSlider.addEventListener("input", () => {
-      thresholdValue.textContent = thresholdSlider.value;
-    });
+  thresholdValue.textContent = thresholdSlider.value;
+  retraceIfImageLoaded();
+});
 
-    smoothSlider.addEventListener("input", () => {
-      smoothValue.textContent = smoothSlider.value;
-    });
+smoothSlider.addEventListener("input", () => {
+  smoothValue.textContent = smoothSlider.value;
+  retraceIfImageLoaded();
+});
 
+function retraceIfImageLoaded() {
+  if (!loadedImage) return;
+
+  drawImageToSourceCanvas();
+
+  const mask = createForegroundMask();
+  const outline = traceOuterSilhouette(mask);
+
+  if (outline.length < 10) {
+    clearPreview();
+    return;
+  }
+
+  const smoothed = smoothOutline(outline, Number(smoothSlider.value));
+  drawClickerPreview(smoothed);
+}
     imageInput.addEventListener("change", () => {
   const file = imageInput.files[0];
   if (!file) return;
