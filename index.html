@@ -213,9 +213,9 @@
         <div class="control-card">
           <label for="designSmoothnessSlider">
             Design smoothness:
-            <span id="designSmoothnessValue" class="value">8</span>
+            <span id="designSmoothnessValue" class="value">5</span>
           </label>
-          <input type="range" id="designSmoothnessSlider" min="1" max="20" value="8" />
+          <input type="range" id="designSmoothnessSlider" min="1" max="20" value="5" />
           <p class="note">Higher = smoother design outlines. Lower = more detail but more jagged.</p>
         </div>
 
@@ -1027,18 +1027,15 @@
 
       const rawDesignMask = createDesignMask();
 
-      // Step 1: Blur the raw pixel mask before tracing to eliminate
-      // single-pixel staircasing — this is the main anti-pixelation step.
-      const blurRadius = Math.max(2, Math.round(Number(designSmoothnessSlider.value) * 0.6));
-      const blurredMask = blurAndRethresholdMask(rawDesignMask, blurRadius, 0.35);
-
-      // Step 2: Morphological close to fill hairline gaps left by blurring.
-      const closedMask = closeMask(blurredMask, 2);
+      // Step 1: Blur the raw pixel mask with a SMALL fixed radius (1px) just
+      // enough to eliminate single-pixel staircasing without merging nearby
+      // separate shapes (ears, eyes, nose etc) into one blob.
+      const blurredMask = blurAndRethresholdMask(rawDesignMask, 1, 0.45);
 
       const components = getAllComponents(
-        closedMask.data,
-        closedMask.width,
-        closedMask.height,
+        blurredMask.data,
+        blurredMask.width,
+        blurredMask.height,
         CLICKER.minDesignComponentPixels
       );
 
@@ -1052,7 +1049,7 @@
       let triangles = [];
 
       for (const component of components) {
-        const boundary = traceComponentBoundary(component, closedMask.width, closedMask.height);
+        const boundary = traceComponentBoundary(component, blurredMask.width, blurredMask.height);
 
         if (boundary.length < 8) continue;
 
@@ -1068,7 +1065,10 @@
 
         // Step 5: Chaikin corner-cutting gives much rounder results than
         // weighted-average smoothing — use passes driven by the smoothness slider.
-        const smoothPasses = Math.max(1, Number(designSmoothnessSlider.value));
+        // Cap at 4 Chaikin passes — each pass doubles the point count, so
+        // more than 4 obliterates fine shapes. Slider maps 1–20 → 1–4 passes.
+        const rawPasses = Number(designSmoothnessSlider.value);
+        const smoothPasses = Math.round(1 + (rawPasses - 1) * (3 / 19));
         poly = chaikinSmooth(poly, smoothPasses);
 
         if (poly.length < 3) continue;
