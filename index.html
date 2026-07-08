@@ -204,10 +204,11 @@
 
         <div class="control-card">
           <label for="detailThresholdSlider">
-            Design darkness threshold:
+            Image/background cutoff:
             <span id="detailThresholdValue" class="value">145</span>
           </label>
           <input type="range" id="detailThresholdSlider" min="40" max="230" value="145" />
+          <p class="note">Lower keeps more image pixels. Higher removes more background.</p>
         </div>
 
         <div class="control-card">
@@ -217,6 +218,27 @@
           </label>
           <input type="range" id="designSmoothnessSlider" min="1" max="20" value="5" />
           <p class="note">Higher = smoother design outlines. Lower = more detail but more jagged.</p>
+        </div>
+
+        <div class="control-card">
+          <label for="maxColorsSelect">Image colors</label>
+          <select id="maxColorsSelect">
+            <option value="4">4 colors</option>
+            <option value="6" selected>6 colors</option>
+            <option value="8">8 colors</option>
+            <option value="10">10 colors</option>
+          </select>
+          <p class="note">More colors resembles the image better, but prints slower with AMS.</p>
+        </div>
+
+        <div class="control-card">
+          <label for="imageResolutionSelect">Image detail resolution</label>
+          <select id="imageResolutionSelect">
+            <option value="120">Normal</option>
+            <option value="160" selected>Smoother</option>
+            <option value="200">Very smooth / larger file</option>
+          </select>
+          <p class="note">Higher resolution reduces pixel look but makes larger 3MFs.</p>
         </div>
 
         <div class="control-card">
@@ -267,6 +289,8 @@
     const smoothSlider = document.getElementById("smoothSlider");
     const detailThresholdSlider = document.getElementById("detailThresholdSlider");
     const designSmoothnessSlider = document.getElementById("designSmoothnessSlider");
+    const maxColorsSelect = document.getElementById("maxColorsSelect");
+    const imageResolutionSelect = document.getElementById("imageResolutionSelect");
 
     const thresholdValue = document.getElementById("thresholdValue");
     const mergeValue = document.getElementById("mergeValue");
@@ -312,12 +336,17 @@
       switchCenterCircleDiameter: 5,
       switchCenterCircleDepth: 3.4,
       raisedDesignHeight: 0.5,
-      flushDesignHeight: 0.06,
+      flushDesignHeight: 0.04,
+      minDesignComponentPixels: 8,
 
-      // Keep color design bodies slightly above the cap surface.
-      // This prevents Bambu from seeing the cap + color regions as one non-manifold mesh.
-      designZGap: 0.03,
-      minDesignComponentPixels: 30,
+      // Non-manifold-safe color image settings.
+      // This uses many tiny separated color tiles instead of self-intersecting smooth blobs.
+      // Tiny gap prevents adjacent color meshes from sharing/crossing faces.
+      colorTileGap: 0.025,
+      colorZGap: 0.08,
+      colorLayerHeight: 0.18,
+      colorKMeansIterations: 8,
+
       assembledCapDrop: 6
     };
 
@@ -351,6 +380,8 @@
     });
 
     designStyle.addEventListener("change", retraceIfImageLoaded);
+    maxColorsSelect.addEventListener("change", retraceIfImageLoaded);
+    imageResolutionSelect.addEventListener("change", retraceIfImageLoaded);
     viewMode.addEventListener("change", rebuild3DPreview);
 
     imageInput.addEventListener("change", () => {
@@ -890,31 +921,38 @@
 
       const capTriangles = makeCapTriangles(currentOutlinePoints);
       const baseTriangles = makeBaseTriangles(currentOutlinePoints);
-      const designTriangles = makeRaisedDesignTriangles(currentOutlinePoints);
+      const designGroups = makeColorTileDesignGroups(currentOutlinePoints);
 
       const capMesh = meshFromTriangles(capTriangles, 0x2563eb);
       const baseMesh = meshFromTriangles(baseTriangles, 0x9ca3af);
-      const designMesh = meshFromTriangles(designTriangles, 0x111827);
+      const designMeshes = designGroups.map(group => meshFromTriangles(group.triangles, group.colorNumber));
 
       capMesh.name = "Top cap";
       baseMesh.name = "Bottom base";
-      designMesh.name = "Top design";
 
       if (mode === "printing") {
         capMesh.position.x = -32;
-        designMesh.position.x = -32;
         baseMesh.position.x = 32;
-        modelGroup.add(capMesh, designMesh, baseMesh);
+
+        for (const mesh of designMeshes) {
+          mesh.position.x = -32;
+        }
+
+        modelGroup.add(capMesh, ...designMeshes, baseMesh);
       }
 
       if (mode === "assembled") {
         capMesh.position.z = CLICKER.baseHeight - CLICKER.assembledCapDrop;
-        designMesh.position.z = CLICKER.baseHeight - CLICKER.assembledCapDrop;
-        modelGroup.add(baseMesh, capMesh, designMesh);
+
+        for (const mesh of designMeshes) {
+          mesh.position.z = CLICKER.baseHeight - CLICKER.assembledCapDrop;
+        }
+
+        modelGroup.add(baseMesh, capMesh, ...designMeshes);
       }
 
       if (mode === "cap") {
-        modelGroup.add(capMesh, designMesh);
+        modelGroup.add(capMesh, ...designMeshes);
       }
 
       if (mode === "base") {
@@ -1027,71 +1065,216 @@
     }
 
     function makeRaisedDesignTriangles(canvasPoints) {
+      return makeColorTileDesignGroups(canvasPoints).flatMap(group => group.triangles);
+    }
+
+    function makeColorTileDesignGroups(canvasPoints) {
       if (designStyle.value === "none") return [];
 
       const transform = makePointTransform(canvasPoints, CLICKER.capMaxSize, CLICKER.capMinShortSide);
       const capPoly = pointsToMillimeters(canvasPoints, CLICKER.capMaxSize, CLICKER.capMinShortSide);
 
-      const rawDesignMask = createDesignMask();
-
-      // Step 1: Blur the raw pixel mask with a SMALL fixed radius (1px) just
-      // enough to eliminate single-pixel staircasing without merging nearby
-      // separate shapes (ears, eyes, nose etc) into one blob.
-      const blurredMask = blurAndRethresholdMask(rawDesignMask, 1, 0.45);
-
-      const components = getAllComponents(
-        blurredMask.data,
-        blurredMask.width,
-        blurredMask.height,
-        CLICKER.minDesignComponentPixels
-      );
+      const colorData = buildQuantizedColorTiles();
 
       const designHeight = designStyle.value === "flush"
         ? CLICKER.flushDesignHeight
-        : CLICKER.raisedDesignHeight;
+        : CLICKER.colorLayerHeight;
 
-      const z0 = CLICKER.capTotalHeight + CLICKER.designZGap;
-      const z1 = CLICKER.capTotalHeight + CLICKER.designZGap + designHeight;
+      const z0 = CLICKER.capTotalHeight + CLICKER.colorZGap;
+      const z1 = CLICKER.capTotalHeight + CLICKER.colorZGap + designHeight;
 
-      let triangles = [];
+      const groups = [];
 
-      for (const component of components) {
-        const boundary = traceComponentBoundary(component, blurredMask.width, blurredMask.height);
+      for (const tileGroup of colorData.groups) {
+        let triangles = [];
 
-        if (boundary.length < 8) continue;
+        for (const tile of tileGroup.tiles) {
+          const p1 = transform({ x: tile.x0, y: tile.y0 });
+          const p2 = transform({ x: tile.x1, y: tile.y1 });
 
-        // Step 3: Simplify with more angular bins than before (240 instead of 120)
-        // so the polygon captures more detail before smoothing rounds it away.
-        const simplified = simplifyRadialOutline(boundary, 240);
+          const center = {
+            x: (p1.x + p2.x) / 2,
+            y: (p1.y + p2.y) / 2
+          };
 
-        if (simplified.length < 4) continue;
+          if (!pointInPolygon(center, capPoly)) continue;
 
-        // Step 4: Transform to mm early, then smooth in mm space so the
-        // smoothing scale matches the final object rather than pixel noise.
-        let poly = simplified.map(p => transform(p));
+          const square = [
+            { x: p1.x, y: p1.y },
+            { x: p2.x, y: p1.y },
+            { x: p2.x, y: p2.y },
+            { x: p1.x, y: p2.y }
+          ];
 
-        // Step 5: Chaikin corner-cutting gives much rounder results than
-        // weighted-average smoothing — use passes driven by the smoothness slider.
-        // Cap at 4 Chaikin passes — each pass doubles the point count, so
-        // more than 4 obliterates fine shapes. Slider maps 1–20 → 1–4 passes.
-        const rawPasses = Number(designSmoothnessSlider.value);
-        const smoothPasses = Math.round(1 + (rawPasses - 1) * (3 / 19));
-        poly = chaikinSmooth(poly, smoothPasses);
-
-        if (poly.length < 3) continue;
-
-        const center = polygonAverageCenter(poly);
-
-        if (!pointInPolygon(center, capPoly)) continue;
-
-        if (polygonArea(poly) < 0) {
-          poly.reverse();
+          triangles.push(...extrudePolygonWithHoles(square, [], z0, z1));
         }
 
-        triangles.push(...extrudePolygonWithHoles(poly, [], z0, z1));
+        if (triangles.length > 0) {
+          groups.push({
+            color: tileGroup.color,
+            colorHex: rgbTo3MFColor(tileGroup.color),
+            colorNumber: rgbToNumber(tileGroup.color),
+            triangles
+          });
+        }
       }
 
-      return triangles;
+      return groups;
+    }
+
+    function buildQuantizedColorTiles() {
+      const width = sourceCanvas.width;
+      const height = sourceCanvas.height;
+      const imageData = sourceCtx.getImageData(0, 0, width, height);
+      const data = imageData.data;
+
+      const gridSize = Number(imageResolutionSelect.value || 160);
+      const maxColors = Number(maxColorsSelect.value || 6);
+      const cutoff = Number(detailThresholdSlider.value);
+      const bg = estimateBackgroundColor(data, width, height);
+
+      const cellW = width / gridSize;
+      const cellH = height / gridSize;
+
+      const samples = [];
+
+      for (let gy = 0; gy < gridSize; gy++) {
+        for (let gx = 0; gx < gridSize; gx++) {
+          const px = Math.floor((gx + 0.5) * cellW);
+          const py = Math.floor((gy + 0.5) * cellH);
+          const i = (py * width + px) * 4;
+
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          const a = data[i + 3];
+
+          if (a < 20) continue;
+
+          const bgDiff = colorDistance({ r, g, b }, bg);
+          const brightness = (r + g + b) / 3;
+
+          // Cutoff is intentionally foreground/background, not "darkness only".
+          // Lower = preserve faint beige/pink/gray image fill. Higher = remove more near-background pixels.
+          const minBgDiff = Math.max(6, 255 - cutoff);
+
+          if (bgDiff < minBgDiff) continue;
+          if (brightness > 248 && bgDiff < 35) continue;
+
+          samples.push({ r, g, b, gx, gy });
+        }
+      }
+
+      if (samples.length === 0) {
+        return { groups: [] };
+      }
+
+      const palette = kMeansColors(samples, maxColors, CLICKER.colorKMeansIterations);
+      const groups = palette.map(color => ({ color, tiles: [] }));
+
+      // Add a tiny gap between tiles so individual tile boxes do not share/intersect faces.
+      // This is the main non-manifold fix.
+      const gapX = cellW * 0.5 * CLICKER.colorTileGap;
+      const gapY = cellH * 0.5 * CLICKER.colorTileGap;
+
+      for (const sample of samples) {
+        let bestIndex = 0;
+        let bestDistance = Infinity;
+
+        for (let i = 0; i < palette.length; i++) {
+          const d = colorDistance(sample, palette[i]);
+          if (d < bestDistance) {
+            bestDistance = d;
+            bestIndex = i;
+          }
+        }
+
+        groups[bestIndex].tiles.push({
+          x0: sample.gx * cellW + gapX,
+          y0: sample.gy * cellH + gapY,
+          x1: (sample.gx + 1) * cellW - gapX,
+          y1: (sample.gy + 1) * cellH - gapY
+        });
+      }
+
+      return {
+        groups: groups.filter(group => group.tiles.length >= CLICKER.minDesignComponentPixels)
+      };
+    }
+
+    function kMeansColors(samples, k, iterations) {
+      const sorted = [...samples].sort((a, b) => {
+        const ba = (a.r + a.g + a.b) / 3;
+        const bb = (b.r + b.g + b.b) / 3;
+        return ba - bb;
+      });
+
+      const centers = [];
+
+      for (let i = 0; i < k; i++) {
+        const index = Math.floor((i + 0.5) * sorted.length / k);
+        const sample = sorted[Math.min(sorted.length - 1, index)];
+        centers.push({ r: sample.r, g: sample.g, b: sample.b });
+      }
+
+      for (let iter = 0; iter < iterations; iter++) {
+        const buckets = centers.map(() => []);
+
+        for (const sample of samples) {
+          let bestIndex = 0;
+          let bestDistance = Infinity;
+
+          for (let i = 0; i < centers.length; i++) {
+            const d = colorDistance(sample, centers[i]);
+            if (d < bestDistance) {
+              bestDistance = d;
+              bestIndex = i;
+            }
+          }
+
+          buckets[bestIndex].push(sample);
+        }
+
+        for (let i = 0; i < centers.length; i++) {
+          if (buckets[i].length === 0) continue;
+
+          centers[i] = {
+            r: Math.round(buckets[i].reduce((sum, p) => sum + p.r, 0) / buckets[i].length),
+            g: Math.round(buckets[i].reduce((sum, p) => sum + p.g, 0) / buckets[i].length),
+            b: Math.round(buckets[i].reduce((sum, p) => sum + p.b, 0) / buckets[i].length)
+          };
+        }
+      }
+
+      const unique = [];
+
+      for (const center of centers) {
+        if (!unique.some(existing => colorDistance(existing, center) < 18)) {
+          unique.push(center);
+        }
+      }
+
+      return unique;
+    }
+
+    function colorDistance(a, b) {
+      return Math.sqrt(
+        Math.pow(a.r - b.r, 2) +
+        Math.pow(a.g - b.g, 2) +
+        Math.pow(a.b - b.b, 2)
+      );
+    }
+
+    function rgbToNumber(color) {
+      return (color.r << 16) + (color.g << 8) + color.b;
+    }
+
+    function rgbTo3MFColor(color) {
+      return "#" +
+        color.r.toString(16).padStart(2, "0").toUpperCase() +
+        color.g.toString(16).padStart(2, "0").toUpperCase() +
+        color.b.toString(16).padStart(2, "0").toUpperCase() +
+        "FF";
     }
 
     function createDesignMask() {
@@ -1455,26 +1638,43 @@
       if (typeof JSZip === "undefined") throw new Error("JSZip did not load.");
 
       const capTriangles = translateTriangles(makeCapTriangles(canvasPoints), -32, 0, 0);
-      const designTriangles = translateTriangles(makeRaisedDesignTriangles(canvasPoints), -32, 0, 0);
+      const designGroups = makeColorTileDesignGroups(canvasPoints);
       const baseTriangles = translateTriangles(makeBaseTriangles(canvasPoints), 32, 0, 0);
-
-      const topObjectTriangles = [
-        ...capTriangles.map(tri => ({ points: tri, material: 0 })),
-        ...designTriangles.map(tri => ({ points: tri, material: 1 }))
-      ];
-
-      const baseObjectTriangles = baseTriangles.map(tri => ({ points: tri, material: 2 }));
-
-      const objects = [
-        { id: 1, name: "Top cap with image design", triangles: topObjectTriangles },
-        { id: 2, name: "Bottom base", triangles: baseObjectTriangles }
-      ];
 
       const materials = [
         { name: "Cap color", color: "#2563EBFF" },
-        { name: "Design color", color: "#111827FF" },
+        ...designGroups.map((group, index) => ({
+          name: `Image color ${index + 1}`,
+          color: group.colorHex
+        })),
         { name: "Base color", color: "#9CA3AFFF" }
       ];
+
+      const objects = [];
+
+      objects.push({
+        id: 1,
+        name: "Top cap",
+        triangles: capTriangles.map(tri => ({ points: tri, material: 0 }))
+      });
+
+      for (let i = 0; i < designGroups.length; i++) {
+        const shifted = translateTriangles(designGroups[i].triangles, -32, 0, 0);
+
+        objects.push({
+          id: i + 2,
+          name: `Image color ${i + 1}`,
+          triangles: shifted.map(tri => ({ points: tri, material: i + 1 }))
+        });
+      }
+
+      const baseMaterialIndex = materials.length - 1;
+
+      objects.push({
+        id: designGroups.length + 2,
+        name: "Bottom base",
+        triangles: baseTriangles.map(tri => ({ points: tri, material: baseMaterialIndex }))
+      });
 
       const modelXml = build3MFModelXml(objects, materials);
       const zip = new JSZip();
