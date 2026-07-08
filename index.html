@@ -12,7 +12,8 @@
   {
     "imports": {
       "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+      "manifold-3d": "https://cdn.jsdelivr.net/npm/manifold-3d@3.5.1/manifold.js"
     }
   }
   </script>
@@ -193,12 +194,12 @@
         <div class="control-card">
           <label for="designStyle">Top design style</label>
           <select id="designStyle">
-            <option value="raised">Raised on top</option>
-            <option value="flush">Almost flush / color only</option>
+            <option value="raised" selected>Raised sticker colors</option>
+            <option value="flush">Thin color layer</option>
             <option value="none">No top design</option>
           </select>
           <p class="note">
-            Flush is still very slightly above the cap so Bambu Studio sees it as a separate color surface.
+            Color is exported as real geometry, not a texture. Raised sticker colors are closest to the sample toys.
           </p>
         </div>
 
@@ -227,6 +228,8 @@
             <option value="6" selected>6 colors</option>
             <option value="8">8 colors</option>
             <option value="10">10 colors</option>
+            <option value="12">12 colors</option>
+            <option value="16">16 colors</option>
           </select>
           <p class="note">More colors resembles the image better, but prints slower with AMS.</p>
         </div>
@@ -278,6 +281,13 @@
   <script type="module">
     import * as THREE from 'three';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import ManifoldModule from 'manifold-3d';
+
+    // Robust CAD kernel. This replaces the hand-built triangle soup that caused
+    // non-manifold edges in Bambu Studio.
+    const manifoldAPI = await ManifoldModule();
+    manifoldAPI.setup();
+    const { Manifold, CrossSection } = manifoldAPI;
 
     // ---------- DOM ----------
     const imageInput = document.getElementById("imageInput");
@@ -336,16 +346,14 @@
       switchCenterCircleDiameter: 5,
       switchCenterCircleDepth: 3.4,
       raisedDesignHeight: 0.5,
-      flushDesignHeight: 0.14,
+      flushDesignHeight: 0.16,
       minDesignComponentPixels: 8,
 
-      // Color image settings. Each color region is traced into a smooth polygon
-      // (same technique as the outer silhouette) instead of a grid of boxes, and
-      // embedded slightly into the cap so it's a true watertight union with no
-      // coincident faces.
-      designEmbedDepth: 0.2,
-      designInsetMm: 0.06,
-      colorLayerHeight: 0.18,
+      // Manifold-3D color image settings.
+      // These are real colored plastic regions, built with a boolean CAD kernel.
+      designEmbedDepth: 0.18,
+      designInsetMm: 0.05,
+      colorLayerHeight: 0.55,
       colorKMeansIterations: 8,
 
       assembledCapDrop: 6
@@ -922,7 +930,7 @@
 
       const capTriangles = makeCapTriangles(currentOutlinePoints);
       const baseTriangles = makeBaseTriangles(currentOutlinePoints);
-      const designGroups = makeColorTileDesignGroups(currentOutlinePoints);
+      const designGroups = makeColorRegionGroups(currentOutlinePoints);
 
       const capMesh = meshFromTriangles(capTriangles, 0x2563eb);
       const baseMesh = meshFromTriangles(baseTriangles, 0x9ca3af);
@@ -990,30 +998,24 @@
     // ---------- MODEL GEOMETRY ----------
     function makeCapTriangles(canvasPoints) {
       const capShape = pointsToMillimeters(canvasPoints, CLICKER.capMaxSize, CLICKER.capMinShortSide);
-      let triangles = [];
 
-      triangles.push(...extrudePolygonWithHoles(
-        capShape,
-        [makeCircle(CLICKER.capInnerCavityDiameter / 2, 72)],
-        0,
-        CLICKER.capInnerCavityDepth
-      ));
+      const capBody = extrudeCS(capShape, CLICKER.capTotalHeight);
 
-      triangles.push(...extrudePolygonWithHoles(
-        capShape,
-        [],
-        CLICKER.capInnerCavityDepth,
-        CLICKER.capTotalHeight
-      ));
+      const cavity = extrudeCS(
+        makeCircle(CLICKER.capInnerCavityDiameter / 2, 96),
+        CLICKER.capInnerCavityDepth + 0.4
+      ).translate(0, 0, -0.2);
 
-      triangles.push(...extrudePolygonWithHoles(
-        makeCircle(CLICKER.socketPostRadius, 48),
-        [makeCrossPolygon(CLICKER.socketCrossLength + 0.10, CLICKER.socketCrossWidth + 0.10)],
-        0,
-        CLICKER.socketPostHeight
-      ));
+      const postOuter = extrudeCS(makeCircle(CLICKER.socketPostRadius, 72), CLICKER.socketPostHeight);
 
-      return triangles;
+      const postCross = extrudeCS(
+        makeCrossPolygon(CLICKER.socketCrossLength + 0.10, CLICKER.socketCrossWidth + 0.10),
+        CLICKER.socketPostHeight + 0.4
+      ).translate(0, 0, -0.2);
+
+      const cap = capBody.subtract(cavity).add(postOuter.subtract(postCross));
+
+      return manifoldToTriangles(cap);
     }
 
     function makeBaseTriangles(canvasPoints) {
@@ -1027,115 +1029,107 @@
       const midZ = CLICKER.baseHeight - CLICKER.baseTopIndentDepth;
       const lowerSquare = CLICKER.switchTopSquareSize - CLICKER.switchStepInset * 2;
 
-      const circleBottomZ = Math.max(
-        0.6,
-        midZ
-          - CLICKER.switchTopSquareDepth
-          - CLICKER.switchLowerSquareDepth
-          - CLICKER.switchCenterCircleDepth
-      );
+      const baseBody = extrudeCS(baseShape, CLICKER.baseHeight);
 
-      let triangles = [];
+      const capIndent = extrudeCS(indentShape, CLICKER.baseTopIndentDepth + 0.4)
+        .translate(0, 0, midZ - 0.2);
 
-      triangles.push(...extrudePolygonWithHoles(baseShape, [], 0, circleBottomZ));
+      const topPocket = extrudeCS(makeSquare(CLICKER.switchTopSquareSize), CLICKER.switchTopSquareDepth + 0.4)
+        .translate(0, 0, midZ - CLICKER.switchTopSquareDepth - 0.2);
 
-      triangles.push(...extrudePolygonWithHoles(
-        baseShape,
-        [makeCircle(CLICKER.switchCenterCircleDiameter / 2, 48)],
-        circleBottomZ,
-        midZ - CLICKER.switchTopSquareDepth - CLICKER.switchLowerSquareDepth
-      ));
+      const lowerPocket = extrudeCS(makeSquare(lowerSquare), CLICKER.switchLowerSquareDepth + 0.4)
+        .translate(0, 0, midZ - CLICKER.switchTopSquareDepth - CLICKER.switchLowerSquareDepth - 0.2);
 
-      triangles.push(...extrudePolygonWithHoles(
-        baseShape,
-        [makeSquare(lowerSquare)],
-        midZ - CLICKER.switchTopSquareDepth - CLICKER.switchLowerSquareDepth,
-        midZ - CLICKER.switchTopSquareDepth
-      ));
+      const centerIndent = extrudeCS(makeCircle(CLICKER.switchCenterCircleDiameter / 2, 72), CLICKER.switchCenterCircleDepth + 0.4)
+        .translate(
+          0,
+          0,
+          midZ
+            - CLICKER.switchTopSquareDepth
+            - CLICKER.switchLowerSquareDepth
+            - CLICKER.switchCenterCircleDepth
+            - 0.2
+        );
 
-      triangles.push(...extrudePolygonWithHoles(
-        baseShape,
-        [makeSquare(CLICKER.switchTopSquareSize)],
-        midZ - CLICKER.switchTopSquareDepth,
-        midZ
-      ));
+      const base = baseBody
+        .subtract(capIndent)
+        .subtract(topPocket)
+        .subtract(lowerPocket)
+        .subtract(centerIndent);
 
-      triangles.push(...extrudePolygonWithHoles(baseShape, [indentShape], midZ, CLICKER.baseHeight));
-
-      return triangles;
+      return manifoldToTriangles(base);
     }
 
     function makeRaisedDesignTriangles(canvasPoints) {
-      return makeColorTileDesignGroups(canvasPoints).flatMap(group => group.triangles);
+      return makeColorRegionGroups(canvasPoints).flatMap(group => group.triangles);
     }
 
-    // Builds one smooth watertight solid per connected same-color region, instead
-    // of a grid of tiny boxes. Each color's cells are spatially exclusive (every
-    // cell is assigned to exactly one palette color), so regions naturally tile
-    // without overlapping — we just need a clean traced outline per region.
-    function makeColorTileDesignGroups(canvasPoints) {
+    function makeColorRegionGroups(canvasPoints) {
       if (designStyle.value === "none") return [];
 
       const transform = makePointTransform(canvasPoints, CLICKER.capMaxSize, CLICKER.capMinShortSide);
       const capPoly = pointsToMillimeters(canvasPoints, CLICKER.capMaxSize, CLICKER.capMinShortSide);
-
       const grid = buildColorRegionGrid();
-      if (grid.palette.length === 0) return [];
 
-      const smoothingPasses = Number(designSmoothnessSlider.value || 5);
+      if (grid.palette.length === 0) return [];
 
       const designHeight = designStyle.value === "flush"
         ? CLICKER.flushDesignHeight
         : CLICKER.colorLayerHeight;
 
-      // Embed the design slightly INTO the cap (rather than floating just above
-      // it) so the two meshes genuinely overlap and form one watertight union —
-      // this is the main non-manifold fix.
       const z0 = CLICKER.capTotalHeight - CLICKER.designEmbedDepth;
       const z1 = CLICKER.capTotalHeight + designHeight;
 
       const groups = [];
+      const smoothSliderValue = Number(designSmoothnessSlider.value || 5);
+      const smoothPasses = Math.max(1, Math.min(4, Math.round(smoothSliderValue / 5)));
 
       for (let colorIndex = 0; colorIndex < grid.palette.length; colorIndex++) {
         const mask = new Uint8Array(grid.gridSize * grid.gridSize);
+
         for (let i = 0; i < mask.length; i++) {
           mask[i] = grid.colorGrid[i] === colorIndex ? 1 : 0;
         }
 
         const components = getAllComponents(mask, grid.gridSize, grid.gridSize, CLICKER.minDesignComponentPixels);
-        let triangles = [];
+        const manifolds = [];
 
         for (const component of components) {
-          // Reuse the exact same trace -> radial-simplify -> smooth pipeline
-          // used for the outer silhouette, just run on the low-res color grid.
           const boundary = traceComponentBoundary(component, grid.gridSize, grid.gridSize);
           if (boundary.length < 6) continue;
 
-          const simplified = simplifyRadialOutline(boundary, 90);
-          if (simplified.length < 6) continue;
+          const bins = Math.min(220, Math.max(32, Math.round(Math.sqrt(boundary.length) * 6)));
+          const simplified = simplifyRadialOutline(boundary, bins);
+          if (simplified.length < 4) continue;
 
-          let smoothed = chaikinSmooth(simplified, Math.min(3, Math.ceil(smoothingPasses / 4)));
-          smoothed = smoothOutline(smoothed, smoothingPasses);
+          let smoothed = chaikinSmooth(simplified, smoothPasses);
+          smoothed = smoothOutline(smoothed, smoothSliderValue);
 
-          // grid cell space -> source canvas pixel space -> mm space
-          const mmPoints = smoothed.map(p => transform({
+          let mmPoints = smoothed.map(p => transform({
             x: (p.x + 0.5) * grid.cellW,
             y: (p.y + 0.5) * grid.cellH
           }));
 
-          // Shrink slightly inward so neighboring color regions never share an
-          // exact edge/face with each other.
-          const inset = insetPolygon(mmPoints, CLICKER.designInsetMm);
-          if (inset.length < 3) continue;
+          mmPoints = insetPolygon(mmPoints, CLICKER.designInsetMm);
 
-          const center = polygonAverageCenter(inset);
+          if (mmPoints.length < 3) continue;
+
+          const center = polygonAverageCenter(mmPoints);
           if (!pointInPolygon(center, capPoly)) continue;
 
-          triangles.push(...extrudePolygonWithHoles(inset, [], z0, z1));
+          try {
+            const solid = extrudeCS(mmPoints, z1 - z0).translate(0, 0, z0);
+            if (!solid.isEmpty()) manifolds.push(solid);
+          } catch (error) {
+            console.warn("Skipped one color region:", error);
+          }
         }
 
-        if (triangles.length > 0) {
+        if (manifolds.length > 0) {
+          const combined = Manifold.union(manifolds);
+          const triangles = manifoldToTriangles(combined);
           const color = grid.palette[colorIndex];
+
           groups.push({
             color,
             colorHex: rgbTo3MFColor(color),
@@ -1148,25 +1142,6 @@
       return groups;
     }
 
-    // Shrinks a polygon toward its own centroid by a fixed millimeter margin.
-    function insetPolygon(points, marginMm) {
-      if (points.length < 3 || marginMm <= 0) return points;
-
-      const center = polygonAverageCenter(points);
-      const avgRadius = points.reduce((sum, p) => sum + Math.hypot(p.x - center.x, p.y - center.y), 0) / points.length;
-
-      if (avgRadius <= 0.01) return points;
-
-      const scale = Math.max(0.35, (avgRadius - marginMm) / avgRadius);
-
-      return points.map(p => ({
-        x: center.x + (p.x - center.x) * scale,
-        y: center.y + (p.y - center.y) * scale
-      }));
-    }
-
-    // Quantizes the image into a low-res grid where every foreground cell is
-    // assigned exactly one palette color index (or left at -1 for background).
     function buildColorRegionGrid() {
       const width = sourceCanvas.width;
       const height = sourceCanvas.height;
@@ -1199,9 +1174,6 @@
 
           const bgDiff = colorDistance({ r, g, b }, bg);
           const brightness = (r + g + b) / 3;
-
-          // Cutoff is intentionally foreground/background, not "darkness only".
-          // Lower = preserve faint beige/pink/gray image fill. Higher = remove more near-background pixels.
           const minBgDiff = Math.max(6, 255 - cutoff);
 
           if (bgDiff < minBgDiff) continue;
@@ -1310,43 +1282,29 @@
         "FF";
     }
 
+    function insetPolygon(points, marginMm) {
+      if (points.length < 3 || marginMm <= 0) return points;
+
+      const center = polygonAverageCenter(points);
+      const avgRadius = points.reduce((sum, p) => sum + Math.hypot(p.x - center.x, p.y - center.y), 0) / points.length;
+
+      if (avgRadius <= 0.01) return points;
+
+      const scale = Math.max(0.35, (avgRadius - marginMm) / avgRadius);
+
+      return points.map(p => ({
+        x: center.x + (p.x - center.x) * scale,
+        y: center.y + (p.y - center.y) * scale
+      }));
+    }
+
     function createDesignMask() {
       const width = sourceCanvas.width;
       const height = sourceCanvas.height;
-      const imageData = sourceCtx.getImageData(0, 0, width, height);
-      const data = imageData.data;
-
-      const threshold = Number(detailThresholdSlider.value);
-      const mask = new Uint8Array(width * height);
-      const bg = estimateBackgroundColor(data, width, height);
-
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const i = (y * width + x) * 4;
-
-          const r = data[i];
-          const g = data[i + 1];
-          const b = data[i + 2];
-          const a = data[i + 3];
-
-          if (a < 20) continue;
-
-          const brightness = (r + g + b) / 3;
-          const bgDiff = Math.sqrt(
-            Math.pow(r - bg.r, 2) +
-            Math.pow(g - bg.g, 2) +
-            Math.pow(b - bg.b, 2)
-          );
-
-          if (brightness <= threshold && bgDiff > 8) {
-            mask[y * width + x] = 1;
-          }
-        }
-      }
-
-      return { data: mask, width, height };
+      return { data: new Uint8Array(width * height), width, height };
     }
 
+    
     function getAllComponents(data, width, height, minPixels) {
       const visited = new Uint8Array(width * height);
       const components = [];
@@ -1395,6 +1353,56 @@
       }
 
       return components;
+    }
+
+
+    function polygonToPath(poly) {
+      const path = poly.map(p => [p.x, p.y]);
+
+      if (path.length > 2) {
+        const first = path[0];
+        const last = path[path.length - 1];
+
+        if (Math.hypot(first[0] - last[0], first[1] - last[1]) < 0.00001) {
+          path.pop();
+        }
+      }
+
+      return path;
+    }
+
+    function crossSectionFromPolygon(poly) {
+      return CrossSection.ofPolygons([polygonToPath(poly)]);
+    }
+
+    function extrudeCS(poly, height) {
+      const cs = crossSectionFromPolygon(poly);
+      return Manifold.extrude(cs, height);
+    }
+
+    function manifoldToTriangles(solid) {
+      const mesh = solid.getMesh();
+      const verts = mesh.vertProperties;
+      const triVerts = mesh.triVerts;
+      const numProp = mesh.numProp || 3;
+      const triangles = [];
+
+      for (let i = 0; i < triVerts.length; i += 3) {
+        const tri = [];
+
+        for (let j = 0; j < 3; j++) {
+          const vi = triVerts[i + j];
+          tri.push({
+            x: verts[vi * numProp],
+            y: verts[vi * numProp + 1],
+            z: verts[vi * numProp + 2]
+          });
+        }
+
+        triangles.push(tri);
+      }
+
+      return triangles;
     }
 
     function pointsToMillimeters(points, targetMaxSize, minShortSide = 0) {
@@ -1671,7 +1679,7 @@
       if (typeof JSZip === "undefined") throw new Error("JSZip did not load.");
 
       const capTriangles = translateTriangles(makeCapTriangles(canvasPoints), -32, 0, 0);
-      const designGroups = makeColorTileDesignGroups(canvasPoints);
+      const designGroups = makeColorRegionGroups(canvasPoints);
       const baseTriangles = translateTriangles(makeBaseTriangles(canvasPoints), 32, 0, 0);
 
       const materials = [
@@ -1742,22 +1750,34 @@
     function build3MFModelXml(objects, materials) {
       const materialXml = materials
         .map(mat => `      <base name="${escapeXml(mat.name)}" displaycolor="${mat.color}"/>`)
-        .join("\n");
+        .join("
+");
 
-      const objectXml = objects.map(obj => meshObjectTo3MFXml(obj)).join("\n");
-      const buildXml = objects.map(obj => `    <item objectid="${obj.id}"/>`).join("\n");
+      const objectXml = objects.map(obj => meshObjectTo3MFXml(obj)).join("
+");
+
+      const assemblyId = 9999;
+      const componentXml = objects
+        .map(obj => `        <component objectid="${obj.id}"/>`)
+        .join("
+");
 
       return `<?xml version="1.0" encoding="UTF-8"?>
 <model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
-  <metadata name="Application">Clicker Generator</metadata>
+  <metadata name="Application">Clicker Generator Manifold-3D</metadata>
   <resources>
     <basematerials id="10">
 ${materialXml}
     </basematerials>
 ${objectXml}
+    <object id="${assemblyId}" type="model" name="Custom image clicker assembly">
+      <components>
+${componentXml}
+      </components>
+    </object>
   </resources>
   <build>
-${buildXml}
+    <item objectid="${assemblyId}"/>
   </build>
 </model>`;
     }
