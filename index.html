@@ -4,8 +4,14 @@
   <meta charset="UTF-8" />
   <title>Clicker Generator</title>
   <link rel="icon" href="data:,">
+
+  <!-- Geometry/export libraries -->
   <script src="https://cdn.jsdelivr.net/npm/earcut@2.2.4/dist/earcut.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+
+  <!-- 3D preview -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
 
   <style>
     body {
@@ -13,82 +19,130 @@
       background: #111827;
       color: white;
       margin: 0;
-      padding: 32px;
+      padding: 28px;
     }
 
     h1 {
       margin-top: 0;
-      font-size: 40px;
+      margin-bottom: 8px;
+      font-size: 38px;
     }
 
     .panel {
       background: #1f2937;
       border: 1px solid #374151;
-      border-radius: 12px;
+      border-radius: 14px;
       padding: 20px;
-      max-width: 1100px;
+      max-width: 1280px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 20px;
+      align-items: start;
     }
 
     .controls {
-      margin-top: 20px;
       display: grid;
-      gap: 16px;
-      max-width: 600px;
+      gap: 14px;
+    }
+
+    .control-card, .viewer-card {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 14px;
     }
 
     label {
       font-weight: bold;
+      display: block;
+      margin-bottom: 5px;
     }
 
     input[type="file"],
     input[type="range"],
+    select,
     button {
-      font-size: 16px;
-      margin-top: 6px;
+      font-size: 15px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    select,
+    button {
+      padding: 9px 10px;
+      border-radius: 8px;
+      border: 1px solid #475569;
     }
 
     button {
-      padding: 10px 14px;
-      border: none;
-      border-radius: 8px;
       background: #2563eb;
       color: white;
       font-weight: bold;
       cursor: pointer;
+      border: none;
     }
 
     button:hover {
       background: #1d4ed8;
     }
 
-    .canvas-row {
-      margin-top: 24px;
-      display: flex;
-      gap: 20px;
-      flex-wrap: wrap;
+    .secondary {
+      background: #374151;
     }
 
-    .canvas-card {
-      background: #0f172a;
-      border: 1px solid #334155;
-      border-radius: 12px;
-      padding: 12px;
-    }
-
-    canvas {
-      background: white;
-      border-radius: 8px;
-      max-width: 100%;
+    .secondary:hover {
+      background: #4b5563;
     }
 
     .note {
       color: #cbd5e1;
-      line-height: 1.5;
+      line-height: 1.45;
+      font-size: 14px;
     }
 
     .value {
       color: #93c5fd;
       font-weight: normal;
+    }
+
+    #viewer {
+      width: 100%;
+      height: 640px;
+      background: #e5e7eb;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    canvas.preview2d {
+      width: 100%;
+      background: white;
+      border-radius: 8px;
+      margin-top: 8px;
+    }
+
+    .mini-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .mini-grid h4 {
+      margin: 0 0 6px 0;
+      font-size: 14px;
+    }
+
+    @media (max-width: 950px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      #viewer {
+        height: 520px;
+      }
     }
   </style>
 </head>
@@ -96,62 +150,98 @@
 <body>
   <div class="panel">
     <h1>Clicker Generator</h1>
-
     <p class="note">
-      Upload a simple image. This version detects the whole visible object, merges nearby parts,
-      and previews a matching clicker shape.
+      Upload a simple image, generate a matching-shape clicker, preview it in 3D, and export one 3MF.
+      The top cap and image design export together; the base exports beside it.
     </p>
 
-    <div class="controls">
-      <div>
-        <label for="imageInput">Upload image</label><br />
-        <input type="file" id="imageInput" accept="image/*" />
+    <div class="layout">
+      <div class="controls">
+        <div class="control-card">
+          <label for="imageInput">Upload image</label>
+          <input type="file" id="imageInput" accept="image/*" />
+        </div>
+
+        <div class="control-card">
+          <label for="thresholdSlider">
+            Background sensitivity:
+            <span id="thresholdValue" class="value">35</span>
+          </label>
+          <input type="range" id="thresholdSlider" min="5" max="160" value="35" />
+        </div>
+
+        <div class="control-card">
+          <label for="mergeSlider">
+            Merge nearby pieces:
+            <span id="mergeValue" class="value">12</span>
+          </label>
+          <input type="range" id="mergeSlider" min="0" max="35" value="12" />
+        </div>
+
+        <div class="control-card">
+          <label for="smoothSlider">
+            Outline smoothing:
+            <span id="smoothValue" class="value">4</span>
+          </label>
+          <input type="range" id="smoothSlider" min="0" max="20" value="4" />
+        </div>
+
+        <div class="control-card">
+          <label for="designStyle">Top design style</label>
+          <select id="designStyle">
+            <option value="raised">Raised on top</option>
+            <option value="flush">Almost flush / color only</option>
+            <option value="none">No top design</option>
+          </select>
+          <p class="note">
+            Flush is still very slightly above the cap so Bambu Studio sees it as a separate color surface.
+          </p>
+        </div>
+
+        <div class="control-card">
+          <label for="detailThresholdSlider">
+            Design darkness threshold:
+            <span id="detailThresholdValue" class="value">145</span>
+          </label>
+          <input type="range" id="detailThresholdSlider" min="40" max="230" value="145" />
+        </div>
+
+        <div class="control-card">
+          <label for="viewMode">Preview mode</label>
+          <select id="viewMode">
+            <option value="printing">Printing layout</option>
+            <option value="assembled">Assembled preview</option>
+            <option value="cap">Top cap only</option>
+            <option value="base">Bottom base only</option>
+          </select>
+        </div>
+
+        <button id="traceButton" class="secondary">Trace / Update Preview</button>
+        <button id="export3mfButton">Download 3MF</button>
+
+        <p id="statusText" class="note">Waiting for image...</p>
+
+        <div class="mini-grid">
+          <div class="control-card">
+            <h4>Original</h4>
+            <canvas id="sourceCanvas" class="preview2d" width="360" height="360"></canvas>
+          </div>
+          <div class="control-card">
+            <h4>Detected outline</h4>
+            <canvas id="outlineCanvas" class="preview2d" width="360" height="360"></canvas>
+          </div>
+        </div>
       </div>
 
-      <div>
-        <label for="thresholdSlider">
-          Background sensitivity:
-          <span id="thresholdValue" class="value">35</span>
-        </label><br />
-        <input type="range" id="thresholdSlider" min="5" max="160" value="35" />
-      </div>
-
-      <div>
-        <label for="mergeSlider">
-          Merge nearby pieces:
-          <span id="mergeValue" class="value">12</span>
-        </label><br />
-        <input type="range" id="mergeSlider" min="0" max="35" value="12" />
-      </div>
-
-      <div>
-        <label for="smoothSlider">
-          Outline smoothing:
-          <span id="smoothValue" class="value">4</span>
-        </label><br />
-        <input type="range" id="smoothSlider" min="0" max="20" value="4" />
-      </div>
-
-      <button id="traceButton">Trace Silhouette</button>
-      <button id="export3mfButton">Download 3MF</button>
-
-      <p id="statusText" class="note">Waiting for image...</p>
-    </div>
-
-    <div class="canvas-row">
-      <div class="canvas-card">
-        <h3>Original</h3>
-        <canvas id="sourceCanvas" width="500" height="500"></canvas>
-      </div>
-
-      <div class="canvas-card">
-        <h3>Detected Clicker Shape</h3>
-        <canvas id="previewCanvas" width="500" height="500"></canvas>
+      <div class="viewer-card">
+        <h3 style="margin-top:0;">3D Preview</h3>
+        <div id="viewer"></div>
       </div>
     </div>
   </div>
 
   <script>
+    // ---------- DOM ----------
     const imageInput = document.getElementById("imageInput");
     const traceButton = document.getElementById("traceButton");
     const export3mfButton = document.getElementById("export3mfButton");
@@ -159,21 +249,63 @@
     const thresholdSlider = document.getElementById("thresholdSlider");
     const mergeSlider = document.getElementById("mergeSlider");
     const smoothSlider = document.getElementById("smoothSlider");
+    const detailThresholdSlider = document.getElementById("detailThresholdSlider");
 
     const thresholdValue = document.getElementById("thresholdValue");
     const mergeValue = document.getElementById("mergeValue");
     const smoothValue = document.getElementById("smoothValue");
+    const detailThresholdValue = document.getElementById("detailThresholdValue");
+
+    const designStyle = document.getElementById("designStyle");
+    const viewMode = document.getElementById("viewMode");
 
     const sourceCanvas = document.getElementById("sourceCanvas");
     const sourceCtx = sourceCanvas.getContext("2d", { willReadFrequently: true });
 
-    const previewCanvas = document.getElementById("previewCanvas");
-    const previewCtx = previewCanvas.getContext("2d");
+    const outlineCanvas = document.getElementById("outlineCanvas");
+    const outlineCtx = outlineCanvas.getContext("2d");
 
     const statusText = document.getElementById("statusText");
 
     let loadedImage = null;
     let currentOutlinePoints = null;
+    let scene, camera, renderer, controls, modelGroup;
+
+    // ---------- TESTED MECHANICAL VALUES ----------
+    // Do not change switch/socket dimensions unless intentionally retesting fit.
+    const CLICKER = {
+      capMaxSize: 40,
+      baseMaxSize: 50,
+
+      capTotalHeight: 8,
+      capInnerCavityDiameter: 20,
+      capInnerCavityDepth: 3.8,
+
+      socketPostHeight: 3.8,
+      socketPostRadius: 2.8,
+      socketCrossLength: 4.276,
+      socketCrossWidth: 1.3,
+
+      baseHeight: 18,
+      baseTopIndentDepth: 6,
+      baseTopIndentClearance: 1,
+
+      switchTopSquareSize: 16,
+      switchTopSquareDepth: 3,
+      switchStepInset: 1,
+      switchLowerSquareDepth: 5,
+      switchCenterCircleDiameter: 5,
+      switchCenterCircleDepth: 3.4,
+
+      raisedDesignHeight: 0.5,
+      flushDesignHeight: 0.04,
+      detailGridSize: 120,
+      assembledCapDrop: 6
+    };
+
+    // ---------- EVENTS ----------
+    initViewer();
+    clearCanvases();
 
     thresholdSlider.addEventListener("input", () => {
       thresholdValue.textContent = thresholdSlider.value;
@@ -189,6 +321,14 @@
       smoothValue.textContent = smoothSlider.value;
       retraceIfImageLoaded();
     });
+
+    detailThresholdSlider.addEventListener("input", () => {
+      detailThresholdValue.textContent = detailThresholdSlider.value;
+      retraceIfImageLoaded();
+    });
+
+    designStyle.addEventListener("change", retraceIfImageLoaded);
+    viewMode.addEventListener("change", rebuild3DPreview);
 
     imageInput.addEventListener("change", () => {
       const file = imageInput.files[0];
@@ -220,11 +360,12 @@
         statusText.textContent = "3MF complete.";
       } catch (error) {
         console.error(error);
-        statusText.textContent = "3MF export failed. Check the console.";
+        statusText.textContent = "3MF export failed. Check console.";
         alert("3MF export failed. Check the browser console.");
       }
     });
 
+    // ---------- IMAGE TRACE ----------
     function retraceIfImageLoaded() {
       if (!loadedImage) return;
 
@@ -233,45 +374,46 @@
       drawImageToSourceCanvas();
 
       const mask = createForegroundMask();
-
-      const mergeAmount = Number(mergeSlider.value);
-      const mergedMask = closeMask(mask, mergeAmount);
-
+      const mergedMask = closeMask(mask, Number(mergeSlider.value));
       const component = getLargestComponent(mergedMask.data, mergedMask.width, mergedMask.height);
 
       if (!component || component.pixels.length < 50) {
-        clearPreview();
-        statusText.textContent = "No clear outline found. Try increasing background sensitivity.";
+        currentOutlinePoints = null;
+        clearOutlineCanvas();
+        clear3DModel();
+        statusText.textContent = "No clear outline found.";
         return;
       }
 
       const outline = traceComponentBoundary(component, mergedMask.width, mergedMask.height);
 
       if (outline.length < 10) {
-        clearPreview();
+        currentOutlinePoints = null;
+        clearOutlineCanvas();
+        clear3DModel();
         statusText.textContent = "Could not trace a usable outline.";
         return;
       }
 
-      const simplified = simplifyRadialOutline(outline, 180);
+      const simplified = simplifyRadialOutline(outline, 220);
       const smoothed = smoothOutline(simplified, Number(smoothSlider.value));
+
       currentOutlinePoints = smoothed;
 
-      drawClickerPreview(smoothed);
-      statusText.textContent = "Trace complete.";
+      drawOutlinePreview(smoothed);
+      rebuild3DPreview();
+
+      statusText.textContent = "Preview updated.";
     }
 
     function drawImageToSourceCanvas() {
       sourceCtx.clearRect(0, 0, sourceCanvas.width, sourceCanvas.height);
 
-      const padding = 40;
+      const padding = 26;
       const maxW = sourceCanvas.width - padding * 2;
       const maxH = sourceCanvas.height - padding * 2;
 
-      const scale = Math.min(
-        maxW / loadedImage.width,
-        maxH / loadedImage.height
-      );
+      const scale = Math.min(maxW / loadedImage.width, maxH / loadedImage.height);
 
       const w = loadedImage.width * scale;
       const h = loadedImage.height * scale;
@@ -283,10 +425,15 @@
       sourceCtx.drawImage(loadedImage, x, y, w, h);
     }
 
-    function clearPreview() {
-      previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
-      previewCtx.fillStyle = "white";
-      previewCtx.fillRect(0, 0, previewCanvas.width, previewCanvas.height);
+    function clearCanvases() {
+      sourceCtx.fillStyle = "white";
+      sourceCtx.fillRect(0, 0, sourceCanvas.width, sourceCanvas.height);
+      clearOutlineCanvas();
+    }
+
+    function clearOutlineCanvas() {
+      outlineCtx.fillStyle = "white";
+      outlineCtx.fillRect(0, 0, outlineCanvas.width, outlineCanvas.height);
     }
 
     function createForegroundMask() {
@@ -297,7 +444,6 @@
 
       const threshold = Number(thresholdSlider.value);
       const mask = new Uint8Array(width * height);
-
       const bg = estimateBackgroundColor(data, width, height);
 
       for (let y = 0; y < height; y++) {
@@ -315,10 +461,7 @@
             Math.pow(b - bg.b, 2)
           );
 
-          const isTransparent = a < 20;
-          const isForeground = !isTransparent && diff > threshold;
-
-          mask[y * width + x] = isForeground ? 1 : 0;
+          mask[y * width + x] = a >= 20 && diff > threshold ? 1 : 0;
         }
       }
 
@@ -326,8 +469,6 @@
     }
 
     function estimateBackgroundColor(data, width, height) {
-      const samples = [];
-
       const samplePoints = [
         [5, 5],
         [width - 6, 5],
@@ -339,17 +480,12 @@
         [width - 6, height / 2]
       ];
 
-      for (const [xRaw, yRaw] of samplePoints) {
+      const samples = samplePoints.map(([xRaw, yRaw]) => {
         const x = Math.floor(xRaw);
         const y = Math.floor(yRaw);
         const i = (y * width + x) * 4;
-
-        samples.push({
-          r: data[i],
-          g: data[i + 1],
-          b: data[i + 2]
-        });
-      }
+        return { r: data[i], g: data[i + 1], b: data[i + 2] };
+      });
 
       return {
         r: Math.round(samples.reduce((sum, p) => sum + p.r, 0) / samples.length),
@@ -360,17 +496,13 @@
 
     function closeMask(mask, radius) {
       if (radius <= 0) return mask;
-
-      let dilated = dilate(mask, radius);
-      let closed = erode(dilated, Math.max(1, Math.floor(radius * 0.55)));
-
-      return closed;
+      const dilated = dilate(mask, radius);
+      return erode(dilated, Math.max(1, Math.floor(radius * 0.55)));
     }
 
     function dilate(mask, radius) {
       const { data, width, height } = mask;
       const output = new Uint8Array(width * height);
-
       const r2 = radius * radius;
 
       for (let y = 0; y < height; y++) {
@@ -403,7 +535,6 @@
     function erode(mask, radius) {
       const { data, width, height } = mask;
       const output = new Uint8Array(width * height);
-
       const r2 = radius * radius;
 
       for (let y = 0; y < height; y++) {
@@ -417,12 +548,7 @@
               const nx = x + dx;
               const ny = y + dy;
 
-              if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
-                all = false;
-                break;
-              }
-
-              if (!data[ny * width + nx]) {
+              if (nx < 0 || nx >= width || ny < 0 || ny >= height || !data[ny * width + nx]) {
                 all = false;
                 break;
               }
@@ -439,13 +565,7 @@
     function getLargestComponent(data, width, height) {
       const visited = new Uint8Array(width * height);
       let bestPixels = [];
-
-      const directions = [
-        [-1, 0],
-        [1, 0],
-        [0, -1],
-        [0, 1]
-      ];
+      const directions = [[-1, 0], [1, 0], [0, -1], [0, 1]];
 
       for (let y = 1; y < height - 1; y++) {
         for (let x = 1; x < width - 1; x++) {
@@ -470,10 +590,8 @@
               const nIndex = ny * width + nx;
 
               if (
-                nx <= 0 ||
-                nx >= width - 1 ||
-                ny <= 0 ||
-                ny >= height - 1 ||
+                nx <= 0 || nx >= width - 1 ||
+                ny <= 0 || ny >= height - 1 ||
                 visited[nIndex] ||
                 data[nIndex] === 0
               ) {
@@ -521,28 +639,20 @@
     function simplifyRadialOutline(points, binCount) {
       const cx = points.reduce((sum, p) => sum + p.x, 0) / points.length;
       const cy = points.reduce((sum, p) => sum + p.y, 0) / points.length;
-
       const bins = new Array(binCount).fill(null);
 
       for (const p of points) {
         const angle = Math.atan2(p.y - cy, p.x - cx);
         const normalized = angle < 0 ? angle + Math.PI * 2 : angle;
         const bin = Math.floor((normalized / (Math.PI * 2)) * binCount);
-
         const distance = Math.hypot(p.x - cx, p.y - cy);
 
         if (!bins[bin] || distance > bins[bin].distance) {
-          bins[bin] = {
-            x: p.x,
-            y: p.y,
-            distance
-          };
+          bins[bin] = { x: p.x, y: p.y, distance };
         }
       }
 
-      return bins
-        .filter(Boolean)
-        .map(p => ({ x: p.x, y: p.y }));
+      return bins.filter(Boolean).map(p => ({ x: p.x, y: p.y }));
     }
 
     function smoothOutline(points, amount) {
@@ -565,39 +675,24 @@
       return smoothed;
     }
 
-    function drawClickerPreview(points) {
-      clearPreview();
+    function drawOutlinePreview(points) {
+      clearOutlineCanvas();
 
-      const fitted = fitPointsToCanvas(points, previewCanvas.width, previewCanvas.height, 70);
+      const fitted = fitPointsToCanvas(points, outlineCanvas.width, outlineCanvas.height, 32);
 
-      drawShape(previewCtx, fitted, {
-        fill: "#9ca3af",
-        stroke: "#4b5563",
-        lineWidth: 8,
-        offsetX: 10,
-        offsetY: 16
-      });
+      outlineCtx.beginPath();
+      outlineCtx.moveTo(fitted[0].x, fitted[0].y);
 
-      drawShape(previewCtx, fitted, {
-        fill: "#2563eb",
-        stroke: "#1e40af",
-        lineWidth: 5,
-        offsetX: 0,
-        offsetY: 0
-      });
+      for (let i = 1; i < fitted.length; i++) {
+        outlineCtx.lineTo(fitted[i].x, fitted[i].y);
+      }
 
-      drawShape(previewCtx, scaleAroundCenter(fitted, 0.78), {
-        fill: "transparent",
-        stroke: "white",
-        lineWidth: 5,
-        offsetX: 0,
-        offsetY: 0
-      });
-
-      previewCtx.fillStyle = "#111827";
-      previewCtx.font = "bold 18px Arial";
-      previewCtx.textAlign = "center";
-      previewCtx.fillText("Shape preview only — STL export comes next", previewCanvas.width / 2, 470);
+      outlineCtx.closePath();
+      outlineCtx.fillStyle = "#2563eb";
+      outlineCtx.strokeStyle = "#111827";
+      outlineCtx.lineWidth = 4;
+      outlineCtx.fill();
+      outlineCtx.stroke();
     }
 
     function fitPointsToCanvas(points, width, height, padding) {
@@ -609,10 +704,7 @@
       const shapeW = maxX - minX;
       const shapeH = maxY - minY;
 
-      const scale = Math.min(
-        (width - padding * 2) / shapeW,
-        (height - padding * 2) / shapeH
-      );
+      const scale = Math.min((width - padding * 2) / shapeW, (height - padding * 2) / shapeH);
 
       return points.map(p => ({
         x: (p.x - minX - shapeW / 2) * scale + width / 2,
@@ -620,114 +712,131 @@
       }));
     }
 
-    function scaleAroundCenter(points, scale) {
-      const cx = points.reduce((sum, p) => sum + p.x, 0) / points.length;
-      const cy = points.reduce((sum, p) => sum + p.y, 0) / points.length;
+    // ---------- 3D PREVIEW ----------
+    function initViewer() {
+      const container = document.getElementById("viewer");
 
-      return points.map(p => ({
-        x: cx + (p.x - cx) * scale,
-        y: cy + (p.y - cy) * scale
-      }));
-    }
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0xe5e7eb);
 
-    function drawShape(ctx, points, options) {
-      const offsetX = options.offsetX || 0;
-      const offsetY = options.offsetY || 0;
+      camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
+      camera.position.set(75, -95, 70);
 
-      ctx.beginPath();
-      ctx.moveTo(points[0].x + offsetX, points[0].y + offsetY);
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(container.clientWidth, container.clientHeight);
+      renderer.setPixelRatio(window.devicePixelRatio);
+      container.appendChild(renderer.domElement);
 
-      for (let i = 1; i < points.length; i++) {
-        ctx.lineTo(points[i].x + offsetX, points[i].y + offsetY);
-      }
+      controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 0, 8);
+      controls.update();
 
-      ctx.closePath();
+      const ambient = new THREE.AmbientLight(0xffffff, 0.72);
+      scene.add(ambient);
 
-      if (options.fill && options.fill !== "transparent") {
-        ctx.fillStyle = options.fill;
-        ctx.fill();
-      }
+      const directional = new THREE.DirectionalLight(0xffffff, 0.75);
+      directional.position.set(70, -90, 110);
+      scene.add(directional);
 
-      if (options.stroke) {
-        ctx.strokeStyle = options.stroke;
-        ctx.lineWidth = options.lineWidth || 2;
-        ctx.lineJoin = "round";
-        ctx.lineCap = "round";
-        ctx.stroke();
-      }
-    }
-  
-    // ---------- 3MF EXPORT ----------
-    const CLICKER = {
-      capMaxSize: 40,
-      baseMaxSize: 50,
+      const grid = new THREE.GridHelper(120, 12, 0x9ca3af, 0xcbd5e1);
+      grid.rotation.x = Math.PI / 2;
+      grid.position.z = -0.01;
+      scene.add(grid);
 
-      capTotalHeight: 8,
-      capInnerCavityDiameter: 20,
-      capInnerCavityDepth: 3.8,
+      modelGroup = new THREE.Group();
+      scene.add(modelGroup);
 
-      socketPostHeight: 3.8,
-      socketPostRadius: 2.8,
-      socketCrossLength: 4.276,
-      socketCrossWidth: 1.3,
-
-      baseHeight: 18,
-      baseTopIndentDepth: 6,
-      baseTopIndentClearance: 1,
-
-      switchTopSquareSize: 16,
-      switchTopSquareDepth: 3,
-      switchStepInset: 1,
-      switchLowerSquareDepth: 5,
-      switchCenterCircleDiameter: 5,
-      switchCenterCircleDepth: 3.4,
-
-      detailRaiseHeight: 0.5,
-      detailGridSize: 85,
-      detailDarkThreshold: 145
-    };
-
-    async function makeClicker3MF(canvasPoints) {
-      if (typeof earcut === "undefined") throw new Error("Earcut did not load.");
-      if (typeof JSZip === "undefined") throw new Error("JSZip did not load.");
-
-      const baseTriangles = makeBaseTriangles(canvasPoints);
-      const capTriangles = makeCapTriangles(canvasPoints);
-      const designTriangles = makeRaisedDesignTriangles(canvasPoints);
-
-      const objects = [
-        { id: 1, name: "Base", colorName: "Base gray", color: "#9CA3AFFF", triangles: baseTriangles },
-        { id: 2, name: "Cap", colorName: "Cap blue", color: "#2563EBFF", triangles: capTriangles }
-      ];
-
-      if (designTriangles.length > 0) {
-        objects.push({ id: 3, name: "Raised image design", colorName: "Design black", color: "#111827FF", triangles: designTriangles });
-      }
-
-      const modelXml = build3MFModelXml(objects);
-      const zip = new JSZip();
-
-      zip.file("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
-</Types>`);
-
-      zip.folder("_rels").file(".rels", `<?xml version="1.0" encoding="UTF-8"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
-</Relationships>`);
-
-      zip.folder("3D").file("3dmodel.model", modelXml);
-
-      return await zip.generateAsync({
-        type: "blob",
-        mimeType: "model/3mf",
-        compression: "DEFLATE",
-        compressionOptions: { level: 6 }
+      window.addEventListener("resize", () => {
+        const w = container.clientWidth;
+        const h = container.clientHeight;
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+        renderer.setSize(w, h);
       });
+
+      animate();
     }
 
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    function clear3DModel() {
+      while (modelGroup.children.length > 0) {
+        const child = modelGroup.children.pop();
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) child.material.dispose();
+      }
+    }
+
+    function rebuild3DPreview() {
+      if (!currentOutlinePoints || !scene) return;
+
+      clear3DModel();
+
+      const mode = viewMode.value;
+
+      const capTriangles = makeCapTriangles(currentOutlinePoints);
+      const baseTriangles = makeBaseTriangles(currentOutlinePoints);
+      const designTriangles = makeRaisedDesignTriangles(currentOutlinePoints);
+
+      const capMesh = meshFromTriangles(capTriangles, 0x2563eb);
+      const baseMesh = meshFromTriangles(baseTriangles, 0x9ca3af);
+      const designMesh = meshFromTriangles(designTriangles, 0x111827);
+
+      capMesh.name = "Top cap";
+      baseMesh.name = "Bottom base";
+      designMesh.name = "Top design";
+
+      if (mode === "printing") {
+        capMesh.position.x = -32;
+        designMesh.position.x = -32;
+        baseMesh.position.x = 32;
+
+        modelGroup.add(capMesh, designMesh, baseMesh);
+      }
+
+      if (mode === "assembled") {
+        capMesh.position.z = CLICKER.baseHeight - CLICKER.assembledCapDrop;
+        designMesh.position.z = CLICKER.baseHeight - CLICKER.assembledCapDrop;
+        modelGroup.add(baseMesh, capMesh, designMesh);
+      }
+
+      if (mode === "cap") {
+        modelGroup.add(capMesh, designMesh);
+      }
+
+      if (mode === "base") {
+        modelGroup.add(baseMesh);
+      }
+    }
+
+    function meshFromTriangles(triangles, color) {
+      const positions = [];
+
+      for (const tri of triangles) {
+        for (const p of tri) {
+          positions.push(p.x, p.y, p.z);
+        }
+      }
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+      geometry.computeVertexNormals();
+
+      const material = new THREE.MeshStandardMaterial({
+        color,
+        roughness: 0.55,
+        metalness: 0.03,
+        side: THREE.DoubleSide
+      });
+
+      return new THREE.Mesh(geometry, material);
+    }
+
+    // ---------- MODEL GEOMETRY ----------
     function makeCapTriangles(canvasPoints) {
       const capShape = pointsToMillimeters(canvasPoints, CLICKER.capMaxSize);
       let triangles = [];
@@ -759,11 +868,21 @@
     function makeBaseTriangles(canvasPoints) {
       const capShape = pointsToMillimeters(canvasPoints, CLICKER.capMaxSize);
       const baseShape = pointsToMillimeters(canvasPoints, CLICKER.baseMaxSize);
-      const indentShape = scalePolygon(capShape, (CLICKER.capMaxSize + CLICKER.baseTopIndentClearance) / CLICKER.capMaxSize);
+      const indentShape = scalePolygon(
+        capShape,
+        (CLICKER.capMaxSize + CLICKER.baseTopIndentClearance) / CLICKER.capMaxSize
+      );
 
       const midZ = CLICKER.baseHeight - CLICKER.baseTopIndentDepth;
       const lowerSquare = CLICKER.switchTopSquareSize - CLICKER.switchStepInset * 2;
-      const circleBottomZ = Math.max(0.6, midZ - CLICKER.switchTopSquareDepth - CLICKER.switchLowerSquareDepth - CLICKER.switchCenterCircleDepth);
+
+      const circleBottomZ = Math.max(
+        0.6,
+        midZ
+          - CLICKER.switchTopSquareDepth
+          - CLICKER.switchLowerSquareDepth
+          - CLICKER.switchCenterCircleDepth
+      );
 
       let triangles = [];
 
@@ -796,6 +915,8 @@
     }
 
     function makeRaisedDesignTriangles(canvasPoints) {
+      if (designStyle.value === "none") return [];
+
       const transform = makePointTransform(canvasPoints, CLICKER.capMaxSize);
       const capPoly = pointsToMillimeters(canvasPoints, CLICKER.capMaxSize);
 
@@ -808,8 +929,14 @@
       const cellW = width / gridSize;
       const cellH = height / gridSize;
 
+      const designHeight = designStyle.value === "flush"
+        ? CLICKER.flushDesignHeight
+        : CLICKER.raisedDesignHeight;
+
       const z0 = CLICKER.capTotalHeight;
-      const z1 = CLICKER.capTotalHeight + CLICKER.detailRaiseHeight;
+      const z1 = CLICKER.capTotalHeight + designHeight;
+
+      const threshold = Number(detailThresholdSlider.value);
 
       let triangles = [];
 
@@ -827,11 +954,15 @@
           if (a < 20) continue;
 
           const brightness = (r + g + b) / 3;
-          if (brightness > CLICKER.detailDarkThreshold) continue;
+          if (brightness > threshold) continue;
 
           const p1 = transform({ x: gx * cellW, y: gy * cellH });
           const p2 = transform({ x: (gx + 1) * cellW, y: (gy + 1) * cellH });
-          const center = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+
+          const center = {
+            x: (p1.x + p2.x) / 2,
+            y: (p1.y + p2.y) / 2
+          };
 
           if (!pointInPolygon(center, capPoly)) continue;
 
@@ -863,9 +994,14 @@
       const cx = center.x;
       const cy = center.y;
 
-      let mm = points.map(p => ({ x: (p.x - cx) * scale, y: -(p.y - cy) * scale }));
+      let mm = points.map(p => ({
+        x: (p.x - cx) * scale,
+        y: -(p.y - cy) * scale
+      }));
 
-      if (polygonArea(mm) < 0) mm.reverse();
+      if (polygonArea(mm) < 0) {
+        mm.reverse();
+      }
 
       return mm;
     }
@@ -885,7 +1021,10 @@
       const cy = center.y;
 
       return function transformPoint(p) {
-        return { x: (p.x - cx) * scale, y: -(p.y - cy) * scale };
+        return {
+          x: (p.x - cx) * scale,
+          y: -(p.y - cy) * scale
+        };
       };
     }
 
@@ -916,9 +1055,14 @@
 
       area *= 0.5;
 
-      if (Math.abs(area) < 0.00001) return bboxCenterFallback(points);
+      if (Math.abs(area) < 0.00001) {
+        return bboxCenterFallback(points);
+      }
 
-      return { x: cx / (6 * area), y: cy / (6 * area) };
+      return {
+        x: cx / (6 * area),
+        y: cy / (6 * area)
+      };
     }
 
     function bboxCenterFallback(points) {
@@ -942,7 +1086,10 @@
       const cx = poly.reduce((sum, p) => sum + p.x, 0) / poly.length;
       const cy = poly.reduce((sum, p) => sum + p.y, 0) / poly.length;
 
-      return poly.map(p => ({ x: cx + (p.x - cx) * scale, y: cy + (p.y - cy) * scale }));
+      return poly.map(p => ({
+        x: cx + (p.x - cx) * scale,
+        y: cy + (p.y - cy) * scale
+      }));
     }
 
     function pointInPolygon(point, polygon) {
@@ -968,7 +1115,10 @@
       const points = [];
       for (let i = 0; i < segments; i++) {
         const a = (Math.PI * 2 * i) / segments;
-        points.push({ x: Math.cos(a) * radius, y: Math.sin(a) * radius });
+        points.push({
+          x: Math.cos(a) * radius,
+          y: Math.sin(a) * radius
+        });
       }
       return points;
     }
@@ -1027,12 +1177,22 @@
       const indices = earcut(flat, holeIndices);
       let triangles = [];
 
+      // Top face
       for (let i = 0; i < indices.length; i += 3) {
-        triangles.push([to3(vertices2d[indices[i]], z1), to3(vertices2d[indices[i + 1]], z1), to3(vertices2d[indices[i + 2]], z1)]);
+        triangles.push([
+          to3(vertices2d[indices[i]], z1),
+          to3(vertices2d[indices[i + 1]], z1),
+          to3(vertices2d[indices[i + 2]], z1)
+        ]);
       }
 
+      // Bottom face
       for (let i = 0; i < indices.length; i += 3) {
-        triangles.push([to3(vertices2d[indices[i + 2]], z0), to3(vertices2d[indices[i + 1]], z0), to3(vertices2d[indices[i]], z0)]);
+        triangles.push([
+          to3(vertices2d[indices[i + 2]], z0),
+          to3(vertices2d[indices[i + 1]], z0),
+          to3(vertices2d[indices[i]], z0)
+        ]);
       }
 
       triangles.push(...wallTriangles(outer, z0, z1, false));
@@ -1072,13 +1232,82 @@
       return triangles;
     }
 
-    function build3MFModelXml(objects) {
-      const materialXml = objects
-        .map(obj => `    <base name="${escapeXml(obj.colorName)}" displaycolor="${obj.color}"/>`)
+    // ---------- 3MF EXPORT ----------
+    async function makeClicker3MF(canvasPoints) {
+      if (typeof earcut === "undefined") {
+        throw new Error("Earcut did not load.");
+      }
+
+      if (typeof JSZip === "undefined") {
+        throw new Error("JSZip did not load.");
+      }
+
+      const capTriangles = translateTriangles(makeCapTriangles(canvasPoints), -32, 0, 0);
+      const designTriangles = translateTriangles(makeRaisedDesignTriangles(canvasPoints), -32, 0, 0);
+      const baseTriangles = translateTriangles(makeBaseTriangles(canvasPoints), 32, 0, 0);
+
+      // Object 1: top cap + design together.
+      // The design remains a separate material inside the same 3MF mesh object.
+      const topObjectTriangles = [
+        ...capTriangles.map(tri => ({ points: tri, material: 0 })),
+        ...designTriangles.map(tri => ({ points: tri, material: 1 }))
+      ];
+
+      // Object 2: bottom base, beside the top cap.
+      const baseObjectTriangles = baseTriangles.map(tri => ({ points: tri, material: 2 }));
+
+      const objects = [
+        { id: 1, name: "Top cap with image design", triangles: topObjectTriangles },
+        { id: 2, name: "Bottom base", triangles: baseObjectTriangles }
+      ];
+
+      const materials = [
+        { name: "Cap color", color: "#2563EBFF" },
+        { name: "Design color", color: "#111827FF" },
+        { name: "Base color", color: "#9CA3AFFF" }
+      ];
+
+      const modelXml = build3MFModelXml(objects, materials);
+      const zip = new JSZip();
+
+      zip.file("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
+</Types>`);
+
+      zip.folder("_rels").file(".rels", `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>`);
+
+      zip.folder("3D").file("3dmodel.model", modelXml);
+
+      return await zip.generateAsync({
+        type: "blob",
+        mimeType: "model/3mf",
+        compression: "DEFLATE",
+        compressionOptions: { level: 6 }
+      });
+    }
+
+    function translateTriangles(triangles, dx, dy, dz) {
+      return triangles.map(tri =>
+        tri.map(p => ({
+          x: p.x + dx,
+          y: p.y + dy,
+          z: p.z + dz
+        }))
+      );
+    }
+
+    function build3MFModelXml(objects, materials) {
+      const materialXml = materials
+        .map(mat => `      <base name="${escapeXml(mat.name)}" displaycolor="${mat.color}"/>`)
         .join("\n");
 
       const objectXml = objects
-        .map((obj, index) => meshObjectTo3MFXml(obj, index))
+        .map(obj => meshObjectTo3MFXml(obj))
         .join("\n");
 
       const buildXml = objects
@@ -1100,16 +1329,20 @@ ${buildXml}
 </model>`;
     }
 
-    function meshObjectTo3MFXml(obj, materialIndex) {
+    function meshObjectTo3MFXml(obj) {
       const vertexMap = new Map();
       const vertices = [];
       const triangles = [];
 
-      const keyForPoint = (p) => `${p.x.toFixed(5)},${p.y.toFixed(5)},${p.z.toFixed(5)}`;
+      const keyForPoint = (p) =>
+        `${p.x.toFixed(5)},${p.y.toFixed(5)},${p.z.toFixed(5)}`;
 
       const addVertex = (p) => {
         const key = keyForPoint(p);
-        if (vertexMap.has(key)) return vertexMap.get(key);
+
+        if (vertexMap.has(key)) {
+          return vertexMap.get(key);
+        }
 
         const index = vertices.length;
         vertexMap.set(key, index);
@@ -1118,7 +1351,12 @@ ${buildXml}
       };
 
       for (const tri of obj.triangles) {
-        triangles.push([addVertex(tri[0]), addVertex(tri[1]), addVertex(tri[2])]);
+        triangles.push({
+          a: addVertex(tri.points[0]),
+          b: addVertex(tri.points[1]),
+          c: addVertex(tri.points[2]),
+          material: tri.material
+        });
       }
 
       const verticesXml = vertices
@@ -1126,7 +1364,7 @@ ${buildXml}
         .join("\n");
 
       const trianglesXml = triangles
-        .map(t => `        <triangle v1="${t[0]}" v2="${t[1]}" v3="${t[2]}" pid="10" p1="${materialIndex}" p2="${materialIndex}" p3="${materialIndex}"/>`)
+        .map(t => `        <triangle v1="${t.a}" v2="${t.b}" v3="${t.c}" pid="10" p1="${t.material}" p2="${t.material}" p3="${t.material}"/>`)
         .join("\n");
 
       return `    <object id="${obj.id}" type="model" name="${escapeXml(obj.name)}">
@@ -1162,7 +1400,6 @@ ${trianglesXml}
 
       URL.revokeObjectURL(url);
     }
-
   </script>
 </body>
 </html>
