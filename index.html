@@ -1750,17 +1750,14 @@
     function build3MFModelXml(objects, materials) {
       const materialXml = materials
         .map(mat => `      <base name="${escapeXml(mat.name)}" displaycolor="${mat.color}"/>`)
-        .join("
-");
+        .join("\n");
 
-      const objectXml = objects.map(obj => meshObjectTo3MFXml(obj)).join("
-");
+      const objectXml = objects.map(obj => meshObjectTo3MFXml(obj)).join("\n");
 
       const assemblyId = 9999;
       const componentXml = objects
         .map(obj => `        <component objectid="${obj.id}"/>`)
-        .join("
-");
+        .join("\n");
 
       return `<?xml version="1.0" encoding="UTF-8"?>
 <model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
