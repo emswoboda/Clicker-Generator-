@@ -336,14 +336,15 @@
       switchCenterCircleDiameter: 5,
       switchCenterCircleDepth: 3.4,
       raisedDesignHeight: 0.5,
-      flushDesignHeight: 0.04,
+      flushDesignHeight: 0.14,
       minDesignComponentPixels: 8,
 
-      // Non-manifold-safe color image settings.
-      // This uses many tiny separated color tiles instead of self-intersecting smooth blobs.
-      // Tiny gap prevents adjacent color meshes from sharing/crossing faces.
-      colorTileGap: 0.025,
-      colorZGap: 0.08,
+      // Color image settings. Each color region is traced into a smooth polygon
+      // (same technique as the outer silhouette) instead of a grid of boxes, and
+      // embedded slightly into the cap so it's a true watertight union with no
+      // coincident faces.
+      designEmbedDepth: 0.2,
+      designInsetMm: 0.06,
       colorLayerHeight: 0.18,
       colorKMeansIterations: 8,
 
@@ -1068,52 +1069,77 @@
       return makeColorTileDesignGroups(canvasPoints).flatMap(group => group.triangles);
     }
 
+    // Builds one smooth watertight solid per connected same-color region, instead
+    // of a grid of tiny boxes. Each color's cells are spatially exclusive (every
+    // cell is assigned to exactly one palette color), so regions naturally tile
+    // without overlapping — we just need a clean traced outline per region.
     function makeColorTileDesignGroups(canvasPoints) {
       if (designStyle.value === "none") return [];
 
       const transform = makePointTransform(canvasPoints, CLICKER.capMaxSize, CLICKER.capMinShortSide);
       const capPoly = pointsToMillimeters(canvasPoints, CLICKER.capMaxSize, CLICKER.capMinShortSide);
 
-      const colorData = buildQuantizedColorTiles();
+      const grid = buildColorRegionGrid();
+      if (grid.palette.length === 0) return [];
+
+      const smoothingPasses = Number(designSmoothnessSlider.value || 5);
 
       const designHeight = designStyle.value === "flush"
         ? CLICKER.flushDesignHeight
         : CLICKER.colorLayerHeight;
 
-      const z0 = CLICKER.capTotalHeight + CLICKER.colorZGap;
-      const z1 = CLICKER.capTotalHeight + CLICKER.colorZGap + designHeight;
+      // Embed the design slightly INTO the cap (rather than floating just above
+      // it) so the two meshes genuinely overlap and form one watertight union —
+      // this is the main non-manifold fix.
+      const z0 = CLICKER.capTotalHeight - CLICKER.designEmbedDepth;
+      const z1 = CLICKER.capTotalHeight + designHeight;
 
       const groups = [];
 
-      for (const tileGroup of colorData.groups) {
+      for (let colorIndex = 0; colorIndex < grid.palette.length; colorIndex++) {
+        const mask = new Uint8Array(grid.gridSize * grid.gridSize);
+        for (let i = 0; i < mask.length; i++) {
+          mask[i] = grid.colorGrid[i] === colorIndex ? 1 : 0;
+        }
+
+        const components = getAllComponents(mask, grid.gridSize, grid.gridSize, CLICKER.minDesignComponentPixels);
         let triangles = [];
 
-        for (const tile of tileGroup.tiles) {
-          const p1 = transform({ x: tile.x0, y: tile.y0 });
-          const p2 = transform({ x: tile.x1, y: tile.y1 });
+        for (const component of components) {
+          // Reuse the exact same trace -> radial-simplify -> smooth pipeline
+          // used for the outer silhouette, just run on the low-res color grid.
+          const boundary = traceComponentBoundary(component, grid.gridSize, grid.gridSize);
+          if (boundary.length < 6) continue;
 
-          const center = {
-            x: (p1.x + p2.x) / 2,
-            y: (p1.y + p2.y) / 2
-          };
+          const simplified = simplifyRadialOutline(boundary, 90);
+          if (simplified.length < 6) continue;
 
+          let smoothed = chaikinSmooth(simplified, Math.min(3, Math.ceil(smoothingPasses / 4)));
+          smoothed = smoothOutline(smoothed, smoothingPasses);
+
+          // grid cell space -> source canvas pixel space -> mm space
+          const mmPoints = smoothed.map(p => transform({
+            x: (p.x + 0.5) * grid.cellW,
+            y: (p.y + 0.5) * grid.cellH
+          }));
+
+          // Shrink slightly inward so neighboring color regions never share an
+          // exact edge/face with each other.
+          const inset = insetPolygon(mmPoints, CLICKER.designInsetMm);
+          if (inset.length < 3) continue;
+
+          const center = polygonAverageCenter(inset);
           if (!pointInPolygon(center, capPoly)) continue;
 
-          const square = [
-            { x: p1.x, y: p1.y },
-            { x: p2.x, y: p1.y },
-            { x: p2.x, y: p2.y },
-            { x: p1.x, y: p2.y }
-          ];
-
-          triangles.push(...extrudePolygonWithHoles(square, [], z0, z1));
+          triangles.push(...extrudePolygonWithHoles(inset, [], z0, z1));
         }
 
         if (triangles.length > 0) {
+          const color = grid.palette[colorIndex];
           groups.push({
-            color: tileGroup.color,
-            colorHex: rgbTo3MFColor(tileGroup.color),
-            colorNumber: rgbToNumber(tileGroup.color),
+            color,
+            colorHex: rgbTo3MFColor(color),
+            colorNumber: rgbToNumber(color),
             triangles
           });
         }
@@ -1122,7 +1148,26 @@
       return groups;
     }
 
-    function buildQuantizedColorTiles() {
+    // Shrinks a polygon toward its own centroid by a fixed millimeter margin.
+    function insetPolygon(points, marginMm) {
+      if (points.length < 3 || marginMm <= 0) return points;
+
+      const center = polygonAverageCenter(points);
+      const avgRadius = points.reduce((sum, p) => sum + Math.hypot(p.x - center.x, p.y - center.y), 0) / points.length;
+
+      if (avgRadius <= 0.01) return points;
+
+      const scale = Math.max(0.35, (avgRadius - marginMm) / avgRadius);
+
+      return points.map(p => ({
+        x: center.x + (p.x - center.x) * scale,
+        y: center.y + (p.y - center.y) * scale
+      }));
+    }
+
+    // Quantizes the image into a low-res grid where every foreground cell is
+    // assigned exactly one palette color index (or left at -1 for background).
+    function buildColorRegionGrid() {
       const width = sourceCanvas.width;
       const height = sourceCanvas.height;
       const imageData = sourceCtx.getImageData(0, 0, width, height);
@@ -1136,7 +1181,8 @@
       const cellW = width / gridSize;
       const cellH = height / gridSize;
 
-      const samples = [];
+      const colorGrid = new Int16Array(gridSize * gridSize).fill(-1);
+      const foregroundCells = [];
 
       for (let gy = 0; gy < gridSize; gy++) {
         for (let gx = 0; gx < gridSize; gx++) {
@@ -1161,45 +1207,32 @@
           if (bgDiff < minBgDiff) continue;
           if (brightness > 248 && bgDiff < 35) continue;
 
-          samples.push({ r, g, b, gx, gy });
+          foregroundCells.push({ r, g, b, gx, gy });
         }
       }
 
-      if (samples.length === 0) {
-        return { groups: [] };
+      if (foregroundCells.length === 0) {
+        return { gridSize, cellW, cellH, colorGrid, palette: [] };
       }
 
-      const palette = kMeansColors(samples, maxColors, CLICKER.colorKMeansIterations);
-      const groups = palette.map(color => ({ color, tiles: [] }));
+      const palette = kMeansColors(foregroundCells, maxColors, CLICKER.colorKMeansIterations);
 
-      // Add a tiny gap between tiles so individual tile boxes do not share/intersect faces.
-      // This is the main non-manifold fix.
-      const gapX = cellW * 0.5 * CLICKER.colorTileGap;
-      const gapY = cellH * 0.5 * CLICKER.colorTileGap;
-
-      for (const sample of samples) {
+      for (const cell of foregroundCells) {
         let bestIndex = 0;
         let bestDistance = Infinity;
 
         for (let i = 0; i < palette.length; i++) {
-          const d = colorDistance(sample, palette[i]);
+          const d = colorDistance(cell, palette[i]);
           if (d < bestDistance) {
             bestDistance = d;
             bestIndex = i;
           }
         }
 
-        groups[bestIndex].tiles.push({
-          x0: sample.gx * cellW + gapX,
-          y0: sample.gy * cellH + gapY,
-          x1: (sample.gx + 1) * cellW - gapX,
-          y1: (sample.gy + 1) * cellH - gapY
-        });
+        colorGrid[cell.gy * gridSize + cell.gx] = bestIndex;
       }
 
-      return {
-        groups: groups.filter(group => group.tiles.length >= CLICKER.minDesignComponentPixels)
-      };
+      return { gridSize, cellW, cellH, colorGrid, palette };
     }
 
     function kMeansColors(samples, k, iterations) {
