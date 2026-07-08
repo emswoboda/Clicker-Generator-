@@ -204,10 +204,11 @@
 
         <div class="control-card">
           <label for="detailThresholdSlider">
-            Design darkness threshold:
+            Design edge sensitivity:
             <span id="detailThresholdValue" class="value">145</span>
           </label>
           <input type="range" id="detailThresholdSlider" min="40" max="230" value="145" />
+          <p class="note">Lower = more lines. Higher = only stronger outlines.</p>
         </div>
 
         <div class="control-card">
@@ -313,7 +314,14 @@
       switchCenterCircleDepth: 3.4,
       raisedDesignHeight: 0.5,
       flushDesignHeight: 0.04,
-      minDesignComponentPixels: 30,
+
+      // Line-art top design settings.
+      // This tries to "draw" the image lines on the cap instead of filling surfaces.
+      minDesignComponentPixels: 8,
+      lineBrushRadius: 1,
+      lineSmoothPasses: 2,
+      lineContourBins: 90,
+
       assembledCapDrop: 6
     };
 
@@ -1025,17 +1033,18 @@
       const transform = makePointTransform(canvasPoints, CLICKER.capMaxSize, CLICKER.capMinShortSide);
       const capPoly = pointsToMillimeters(canvasPoints, CLICKER.capMaxSize, CLICKER.capMinShortSide);
 
-      const rawDesignMask = createDesignMask();
+      // IMPORTANT:
+      // This is now LINE ART, not dark-surface fill.
+      // It finds strong image edges/ink lines and turns those into raised/flush strokes.
+      const rawLineMask = createDesignLineMask();
 
-      // Step 1: Blur the raw pixel mask with a SMALL fixed radius (1px) just
-      // enough to eliminate single-pixel staircasing without merging nearby
-      // separate shapes (ears, eyes, nose etc) into one blob.
-      const blurredMask = blurAndRethresholdMask(rawDesignMask, 1, 0.45);
+      // Tiny bridge so thin lines become printable strokes, without filling whole surfaces.
+      const brushedMask = closeMask(rawLineMask, CLICKER.lineBrushRadius);
 
       const components = getAllComponents(
-        blurredMask.data,
-        blurredMask.width,
-        blurredMask.height,
+        brushedMask.data,
+        brushedMask.width,
+        brushedMask.height,
         CLICKER.minDesignComponentPixels
       );
 
@@ -1049,32 +1058,27 @@
       let triangles = [];
 
       for (const component of components) {
-        const boundary = traceComponentBoundary(component, blurredMask.width, blurredMask.height);
+        const boundary = traceComponentBoundary(component, brushedMask.width, brushedMask.height);
+        if (boundary.length < 6) continue;
 
-        if (boundary.length < 8) continue;
+        // Use fewer bins for small components and more for large components.
+        // This keeps eyes/noses smooth without turning outlines into chunky blobs.
+        const bins = Math.min(
+          140,
+          Math.max(24, Math.round(Math.sqrt(boundary.length) * 5))
+        );
 
-        // Step 3: Simplify with more angular bins than before (240 instead of 120)
-        // so the polygon captures more detail before smoothing rounds it away.
-        const simplified = simplifyRadialOutline(boundary, 240);
+        const simplified = simplifyRadialOutline(boundary, bins);
+        if (simplified.length < 3) continue;
 
-        if (simplified.length < 4) continue;
-
-        // Step 4: Transform to mm early, then smooth in mm space so the
-        // smoothing scale matches the final object rather than pixel noise.
         let poly = simplified.map(p => transform(p));
 
-        // Step 5: Chaikin corner-cutting gives much rounder results than
-        // weighted-average smoothing — use passes driven by the smoothness slider.
-        // Cap at 4 Chaikin passes — each pass doubles the point count, so
-        // more than 4 obliterates fine shapes. Slider maps 1–20 → 1–4 passes.
-        const rawPasses = Number(designSmoothnessSlider.value);
-        const smoothPasses = Math.round(1 + (rawPasses - 1) * (3 / 19));
-        poly = chaikinSmooth(poly, smoothPasses);
+        // Smooth each separate stroke area just enough to remove stair steps.
+        poly = chaikinSmooth(poly, CLICKER.lineSmoothPasses);
 
         if (poly.length < 3) continue;
 
         const center = polygonAverageCenter(poly);
-
         if (!pointInPolygon(center, capPoly)) continue;
 
         if (polygonArea(poly) < 0) {
@@ -1087,41 +1091,111 @@
       return triangles;
     }
 
-    function createDesignMask() {
+    function createDesignLineMask() {
       const width = sourceCanvas.width;
       const height = sourceCanvas.height;
       const imageData = sourceCtx.getImageData(0, 0, width, height);
       const data = imageData.data;
 
-      const threshold = Number(detailThresholdSlider.value);
+      // Slider maps to edge threshold:
+      // lower slider = easier to pick up faint lines;
+      // higher slider = only strongest outlines.
+      const slider = Number(detailThresholdSlider.value);
+      const edgeThreshold = 255 - slider; // 145 slider -> 110 edge threshold
+
       const mask = new Uint8Array(width * height);
       const bg = estimateBackgroundColor(data, width, height);
 
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const i = (y * width + x) * 4;
+      function grayAt(x, y) {
+        const i = (y * width + x) * 4;
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        const a = data[i + 3];
 
-          const r = data[i];
-          const g = data[i + 1];
-          const b = data[i + 2];
-          const a = data[i + 3];
+        if (a < 20) return 255;
 
-          if (a < 20) continue;
+        // Treat pixels very close to the background as background.
+        const bgDiff = Math.sqrt(
+          Math.pow(r - bg.r, 2) +
+          Math.pow(g - bg.g, 2) +
+          Math.pow(b - bg.b, 2)
+        );
 
-          const brightness = (r + g + b) / 3;
-          const bgDiff = Math.sqrt(
-            Math.pow(r - bg.r, 2) +
-            Math.pow(g - bg.g, 2) +
-            Math.pow(b - bg.b, 2)
-          );
+        if (bgDiff < 8) return 255;
 
-          if (brightness <= threshold && bgDiff > 8) {
-            mask[y * width + x] = 1;
+        return (r + g + b) / 3;
+      }
+
+      // Sobel-style edge detection.
+      // This catches outlines and facial/detail lines without filling beige/colored surfaces.
+      for (let y = 1; y < height - 1; y++) {
+        for (let x = 1; x < width - 1; x++) {
+          const g00 = grayAt(x - 1, y - 1);
+          const g10 = grayAt(x, y - 1);
+          const g20 = grayAt(x + 1, y - 1);
+
+          const g01 = grayAt(x - 1, y);
+          const g21 = grayAt(x + 1, y);
+
+          const g02 = grayAt(x - 1, y + 1);
+          const g12 = grayAt(x, y + 1);
+          const g22 = grayAt(x + 1, y + 1);
+
+          const gx =
+            -g00 + g20 +
+            -2 * g01 + 2 * g21 +
+            -g02 + g22;
+
+          const gy =
+            -g00 - 2 * g10 - g20 +
+            g02 + 2 * g12 + g22;
+
+          const magnitude = Math.sqrt(gx * gx + gy * gy);
+
+          // Also include genuinely dark ink pixels so closed black eyes/nose still appear,
+          // but do not include mid-tone fills.
+          const centerGray = grayAt(x, y);
+          const isStrongEdge = magnitude > edgeThreshold;
+          const isDarkInk = centerGray < Math.min(90, slider * 0.65);
+
+          mask[y * width + x] = (isStrongEdge || isDarkInk) ? 1 : 0;
+        }
+      }
+
+      // Remove isolated noise pixels.
+      return cleanTinyNoise(mask, width, height);
+    }
+
+    // Compatibility wrapper in case anything still calls createDesignMask().
+    function createDesignMask() {
+      return createDesignLineMask();
+    }
+
+    function cleanTinyNoise(data, width, height) {
+      const output = new Uint8Array(width * height);
+
+      for (let y = 1; y < height - 1; y++) {
+        for (let x = 1; x < width - 1; x++) {
+          const index = y * width + x;
+          if (!data[index]) continue;
+
+          let neighbors = 0;
+
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              if (dx === 0 && dy === 0) continue;
+              if (data[(y + dy) * width + (x + dx)]) neighbors++;
+            }
+          }
+
+          if (neighbors >= 1) {
+            output[index] = 1;
           }
         }
       }
 
-      return { data: mask, width, height };
+      return { data: output, width, height };
     }
 
     function getAllComponents(data, width, height, minPixels) {
