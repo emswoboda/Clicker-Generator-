@@ -5,11 +5,9 @@
   <title>Clicker Generator</title>
   <link rel="icon" href="data:,">
 
-  <!-- Geometry/export libraries -->
   <script src="https://cdn.jsdelivr.net/npm/earcut@2.2.4/dist/earcut.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
-  <!-- 3D preview (ES modules: three@0.160 no longer ships a UMD examples/js build) -->
   <script type="importmap">
   {
     "imports": {
@@ -213,6 +211,15 @@
         </div>
 
         <div class="control-card">
+          <label for="designSmoothnessSlider">
+            Design smoothness:
+            <span id="designSmoothnessValue" class="value">8</span>
+          </label>
+          <input type="range" id="designSmoothnessSlider" min="1" max="20" value="8" />
+          <p class="note">Higher = smoother design outlines. Lower = more detail but more jagged.</p>
+        </div>
+
+        <div class="control-card">
           <label for="viewMode">Preview mode</label>
           <select id="viewMode">
             <option value="printing">Printing layout</option>
@@ -259,11 +266,13 @@
     const mergeSlider = document.getElementById("mergeSlider");
     const smoothSlider = document.getElementById("smoothSlider");
     const detailThresholdSlider = document.getElementById("detailThresholdSlider");
+    const designSmoothnessSlider = document.getElementById("designSmoothnessSlider");
 
     const thresholdValue = document.getElementById("thresholdValue");
     const mergeValue = document.getElementById("mergeValue");
     const smoothValue = document.getElementById("smoothValue");
     const detailThresholdValue = document.getElementById("detailThresholdValue");
+    const designSmoothnessValue = document.getElementById("designSmoothnessValue");
 
     const designStyle = document.getElementById("designStyle");
     const viewMode = document.getElementById("viewMode");
@@ -280,50 +289,31 @@
     let currentOutlinePoints = null;
     let scene, camera, renderer, controls, modelGroup;
 
-    // ---------- TESTED MECHANICAL VALUES ----------
-    // Do not change switch/socket dimensions unless intentionally retesting fit.
+    // ---------- CLICKER DIMENSIONS ----------
     const CLICKER = {
       capMaxSize: 40,
       baseMaxSize: 50,
-
-      // Minimum short-side sizes so the switch/socket housing always fits.
-      // If an uploaded image is skinny, the whole object scales up instead of
-      // letting the 20 mm cavity break through the walls.
       capMinShortSide: 28,
       baseMinShortSide: 36,
-
       capTotalHeight: 8,
       capInnerCavityDiameter: 20,
       capInnerCavityDepth: 3.8,
-
       socketPostHeight: 3.8,
       socketPostRadius: 2.8,
       socketCrossLength: 4.276,
       socketCrossWidth: 1.3,
-
       baseHeight: 18,
       baseTopIndentDepth: 6,
       baseTopIndentClearance: 1,
-
       switchTopSquareSize: 16,
       switchTopSquareDepth: 3,
       switchStepInset: 1,
       switchLowerSquareDepth: 5,
       switchCenterCircleDiameter: 5,
       switchCenterCircleDepth: 3.4,
-
       raisedDesignHeight: 0.5,
       flushDesignHeight: 0.04,
-      detailGridSize: 120,
-
-      // Smooth "brush-style" top design settings.
-      // Larger brush radius = thicker/smoother design strokes.
-      designBrushRadius: 2,
-      designSmoothPasses: 3,
-      designCurveSmoothing: 5,
-      designContourPoints: 96,
-      minDesignComponentPixels: 10,
-
+      minDesignComponentPixels: 30,
       assembledCapDrop: 6
     };
 
@@ -348,6 +338,11 @@
 
     detailThresholdSlider.addEventListener("input", () => {
       detailThresholdValue.textContent = detailThresholdSlider.value;
+      retraceIfImageLoaded();
+    });
+
+    designSmoothnessSlider.addEventListener("input", () => {
+      designSmoothnessValue.textContent = designSmoothnessSlider.value;
       retraceIfImageLoaded();
     });
 
@@ -699,6 +694,93 @@
       return smoothed;
     }
 
+    // Smooths a polygon using Chaikin's corner-cutting algorithm.
+    // Each pass cuts every corner, doubling the point count while
+    // progressively rounding the shape — much more effective than
+    // simple weighted-average smoothing at reducing jagged pixel edges.
+    function chaikinSmooth(points, passes) {
+      if (points.length < 3 || passes <= 0) return points;
+
+      let pts = points;
+
+      for (let pass = 0; pass < passes; pass++) {
+        const next = [];
+        const n = pts.length;
+
+        for (let i = 0; i < n; i++) {
+          const a = pts[i];
+          const b = pts[(i + 1) % n];
+
+          next.push({
+            x: a.x * 0.75 + b.x * 0.25,
+            y: a.y * 0.75 + b.y * 0.25
+          });
+
+          next.push({
+            x: a.x * 0.25 + b.x * 0.75,
+            y: a.y * 0.25 + b.y * 0.75
+          });
+        }
+
+        pts = next;
+      }
+
+      return pts;
+    }
+
+    // Pre-blurs a binary mask using a box blur approximation (3 passes of
+    // average-neighbor smoothing) to reduce isolated single-pixel noise,
+    // then re-thresholds so the output is still binary. This eliminates
+    // the 1-pixel staircasing that causes jagged outlines on design shapes.
+    function blurAndRethresholdMask(mask, blurRadius, rethresholdFraction) {
+      const { data, width, height } = mask;
+
+      // Convert binary to float for blurring
+      let floatData = new Float32Array(data);
+
+      for (let pass = 0; pass < 3; pass++) {
+        const next = new Float32Array(width * height);
+
+        for (let y = 1; y < height - 1; y++) {
+          for (let x = 1; x < blurRadius; x++) {
+            // just copy edges
+            next[y * width + x] = floatData[y * width + x];
+          }
+
+          for (let x = blurRadius; x < width - blurRadius; x++) {
+            let sum = 0;
+            let count = 0;
+
+            for (let dy = -blurRadius; dy <= blurRadius; dy++) {
+              for (let dx = -blurRadius; dx <= blurRadius; dx++) {
+                const nx = x + dx;
+                const ny = y + dy;
+
+                if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                  sum += floatData[ny * width + nx];
+                  count++;
+                }
+              }
+            }
+
+            next[y * width + x] = sum / count;
+          }
+        }
+
+        floatData = next;
+      }
+
+      // Re-threshold: pixel stays on only if average was above threshold
+      const output = new Uint8Array(width * height);
+      const thresh = rethresholdFraction;
+
+      for (let i = 0; i < floatData.length; i++) {
+        output[i] = floatData[i] >= thresh ? 1 : 0;
+      }
+
+      return { data: output, width, height };
+    }
+
     function drawOutlinePreview(points) {
       clearOutlineCanvas();
 
@@ -818,7 +900,6 @@
         capMesh.position.x = -32;
         designMesh.position.x = -32;
         baseMesh.position.x = 32;
-
         modelGroup.add(capMesh, designMesh, baseMesh);
       }
 
@@ -945,11 +1026,19 @@
       const capPoly = pointsToMillimeters(canvasPoints, CLICKER.capMaxSize, CLICKER.capMinShortSide);
 
       const rawDesignMask = createDesignMask();
-      const brushedMask = closeMask(rawDesignMask, CLICKER.designBrushRadius);
+
+      // Step 1: Blur the raw pixel mask before tracing to eliminate
+      // single-pixel staircasing — this is the main anti-pixelation step.
+      const blurRadius = Math.max(2, Math.round(Number(designSmoothnessSlider.value) * 0.6));
+      const blurredMask = blurAndRethresholdMask(rawDesignMask, blurRadius, 0.35);
+
+      // Step 2: Morphological close to fill hairline gaps left by blurring.
+      const closedMask = closeMask(blurredMask, 2);
+
       const components = getAllComponents(
-        brushedMask.data,
-        brushedMask.width,
-        brushedMask.height,
+        closedMask.data,
+        closedMask.width,
+        closedMask.height,
         CLICKER.minDesignComponentPixels
       );
 
@@ -963,19 +1052,29 @@
       let triangles = [];
 
       for (const component of components) {
-        const boundary = traceComponentBoundary(component, brushedMask.width, brushedMask.height);
+        const boundary = traceComponentBoundary(component, closedMask.width, closedMask.height);
 
         if (boundary.length < 8) continue;
 
-        const smoothDesign = makeSmoothDesignContour(boundary);
+        // Step 3: Simplify with more angular bins than before (240 instead of 120)
+        // so the polygon captures more detail before smoothing rounds it away.
+        const simplified = simplifyRadialOutline(boundary, 240);
 
-        let poly = smoothDesign.map(p => transform(p));
+        if (simplified.length < 4) continue;
+
+        // Step 4: Transform to mm early, then smooth in mm space so the
+        // smoothing scale matches the final object rather than pixel noise.
+        let poly = simplified.map(p => transform(p));
+
+        // Step 5: Chaikin corner-cutting gives much rounder results than
+        // weighted-average smoothing — use passes driven by the smoothness slider.
+        const smoothPasses = Math.max(1, Number(designSmoothnessSlider.value));
+        poly = chaikinSmooth(poly, smoothPasses);
 
         if (poly.length < 3) continue;
 
         const center = polygonAverageCenter(poly);
 
-        // Prevent top design pieces from floating outside the cap.
         if (!pointInPolygon(center, capPoly)) continue;
 
         if (polygonArea(poly) < 0) {
@@ -986,6 +1085,93 @@
       }
 
       return triangles;
+    }
+
+    function createDesignMask() {
+      const width = sourceCanvas.width;
+      const height = sourceCanvas.height;
+      const imageData = sourceCtx.getImageData(0, 0, width, height);
+      const data = imageData.data;
+
+      const threshold = Number(detailThresholdSlider.value);
+      const mask = new Uint8Array(width * height);
+      const bg = estimateBackgroundColor(data, width, height);
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const i = (y * width + x) * 4;
+
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          const a = data[i + 3];
+
+          if (a < 20) continue;
+
+          const brightness = (r + g + b) / 3;
+          const bgDiff = Math.sqrt(
+            Math.pow(r - bg.r, 2) +
+            Math.pow(g - bg.g, 2) +
+            Math.pow(b - bg.b, 2)
+          );
+
+          if (brightness <= threshold && bgDiff > 8) {
+            mask[y * width + x] = 1;
+          }
+        }
+      }
+
+      return { data: mask, width, height };
+    }
+
+    function getAllComponents(data, width, height, minPixels) {
+      const visited = new Uint8Array(width * height);
+      const components = [];
+      const directions = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+
+      for (let y = 1; y < height - 1; y++) {
+        for (let x = 1; x < width - 1; x++) {
+          const startIndex = y * width + x;
+
+          if (visited[startIndex] || data[startIndex] === 0) continue;
+
+          const queue = [startIndex];
+          const pixels = [];
+          visited[startIndex] = 1;
+
+          while (queue.length > 0) {
+            const index = queue.pop();
+            pixels.push(index);
+
+            const px = index % width;
+            const py = Math.floor(index / width);
+
+            for (const [dx, dy] of directions) {
+              const nx = px + dx;
+              const ny = py + dy;
+              const nIndex = ny * width + nx;
+
+              if (
+                nx <= 0 || nx >= width - 1 ||
+                ny <= 0 || ny >= height - 1 ||
+                visited[nIndex] ||
+                data[nIndex] === 0
+              ) {
+                continue;
+              }
+
+              visited[nIndex] = 1;
+              queue.push(nIndex);
+            }
+          }
+
+          if (pixels.length >= minPixels) {
+            components.push({ pixels, set: new Set(pixels) });
+          }
+        }
+      }
+
+      return components;
     }
 
     function pointsToMillimeters(points, targetMaxSize, minShortSide = 0) {
@@ -1001,8 +1187,6 @@
 
       let scale = targetMaxSize / longSide;
 
-      // Important: if the uploaded object is skinny/small, scale it up enough
-      // that the switch/socket housing still has real plastic around it.
       if (minShortSide > 0 && shortSide * scale < minShortSide) {
         scale = minShortSide / shortSide;
       }
@@ -1116,176 +1300,6 @@
       }));
     }
 
-
-
-    function makeSmoothDesignContour(boundary) {
-      // Convert the pixel-edge cloud into a much smoother closed contour.
-      // This is intentionally softer than the main object outline because
-      // the top design should look like a sticker/brush path, not Minecraft pixels.
-      let contour = simplifyRadialOutline(boundary, CLICKER.designContourPoints);
-
-      contour = smoothOutline(contour, CLICKER.designSmoothPasses);
-      contour = chaikinClosedCurve(contour, CLICKER.designCurveSmoothing);
-      contour = removeNearDuplicatePoints(contour, 0.8);
-
-      return contour;
-    }
-
-    function chaikinClosedCurve(points, iterations) {
-      if (!points || points.length < 3) return points;
-
-      let result = points.map(p => ({ x: p.x, y: p.y }));
-
-      for (let iter = 0; iter < iterations; iter++) {
-        const next = [];
-
-        for (let i = 0; i < result.length; i++) {
-          const p0 = result[i];
-          const p1 = result[(i + 1) % result.length];
-
-          next.push({
-            x: p0.x * 0.75 + p1.x * 0.25,
-            y: p0.y * 0.75 + p1.y * 0.25
-          });
-
-          next.push({
-            x: p0.x * 0.25 + p1.x * 0.75,
-            y: p0.y * 0.25 + p1.y * 0.75
-          });
-        }
-
-        result = next;
-      }
-
-      return result;
-    }
-
-    function removeNearDuplicatePoints(points, minDistance) {
-      if (!points || points.length < 3) return points;
-
-      const cleaned = [];
-
-      for (const p of points) {
-        const last = cleaned[cleaned.length - 1];
-
-        if (!last || Math.hypot(p.x - last.x, p.y - last.y) >= minDistance) {
-          cleaned.push(p);
-        }
-      }
-
-      if (
-        cleaned.length > 2 &&
-        Math.hypot(
-          cleaned[0].x - cleaned[cleaned.length - 1].x,
-          cleaned[0].y - cleaned[cleaned.length - 1].y
-        ) < minDistance
-      ) {
-        cleaned.pop();
-      }
-
-      return cleaned;
-    }
-
-
-    function createDesignMask() {
-      const width = sourceCanvas.width;
-      const height = sourceCanvas.height;
-      const imageData = sourceCtx.getImageData(0, 0, width, height);
-      const data = imageData.data;
-
-      const threshold = Number(detailThresholdSlider.value);
-      const mask = new Uint8Array(width * height);
-      const bg = estimateBackgroundColor(data, width, height);
-
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const i = (y * width + x) * 4;
-
-          const r = data[i];
-          const g = data[i + 1];
-          const b = data[i + 2];
-          const a = data[i + 3];
-
-          if (a < 20) continue;
-
-          const brightness = (r + g + b) / 3;
-          const bgDiff = Math.sqrt(
-            Math.pow(r - bg.r, 2) +
-            Math.pow(g - bg.g, 2) +
-            Math.pow(b - bg.b, 2)
-          );
-
-          // Dark/non-background pixels become design strokes.
-          if (brightness <= threshold && bgDiff > 8) {
-            mask[y * width + x] = 1;
-          }
-        }
-      }
-
-      return { data: mask, width, height };
-    }
-
-    function getAllComponents(data, width, height, minPixels) {
-      const visited = new Uint8Array(width * height);
-      const components = [];
-
-      const directions = [
-        [-1, 0],
-        [1, 0],
-        [0, -1],
-        [0, 1]
-      ];
-
-      for (let y = 1; y < height - 1; y++) {
-        for (let x = 1; x < width - 1; x++) {
-          const startIndex = y * width + x;
-
-          if (visited[startIndex] || data[startIndex] === 0) continue;
-
-          const queue = [startIndex];
-          const pixels = [];
-          visited[startIndex] = 1;
-
-          while (queue.length > 0) {
-            const index = queue.pop();
-            pixels.push(index);
-
-            const px = index % width;
-            const py = Math.floor(index / width);
-
-            for (const [dx, dy] of directions) {
-              const nx = px + dx;
-              const ny = py + dy;
-              const nIndex = ny * width + nx;
-
-              if (
-                nx <= 0 ||
-                nx >= width - 1 ||
-                ny <= 0 ||
-                ny >= height - 1 ||
-                visited[nIndex] ||
-                data[nIndex] === 0
-              ) {
-                continue;
-              }
-
-              visited[nIndex] = 1;
-              queue.push(nIndex);
-            }
-          }
-
-          if (pixels.length >= minPixels) {
-            components.push({
-              pixels,
-              set: new Set(pixels)
-            });
-          }
-        }
-      }
-
-      return components;
-    }
-
     function polygonAverageCenter(poly) {
       return {
         x: poly.reduce((sum, p) => sum + p.x, 0) / poly.length,
@@ -1316,10 +1330,7 @@
       const points = [];
       for (let i = 0; i < segments; i++) {
         const a = (Math.PI * 2 * i) / segments;
-        points.push({
-          x: Math.cos(a) * radius,
-          y: Math.sin(a) * radius
-        });
+        points.push({ x: Math.cos(a) * radius, y: Math.sin(a) * radius });
       }
       return points;
     }
@@ -1378,7 +1389,6 @@
       const indices = earcut(flat, holeIndices);
       let triangles = [];
 
-      // Top face
       for (let i = 0; i < indices.length; i += 3) {
         triangles.push([
           to3(vertices2d[indices[i]], z1),
@@ -1387,7 +1397,6 @@
         ]);
       }
 
-      // Bottom face
       for (let i = 0; i < indices.length; i += 3) {
         triangles.push([
           to3(vertices2d[indices[i + 2]], z0),
@@ -1435,26 +1444,18 @@
 
     // ---------- 3MF EXPORT ----------
     async function makeClicker3MF(canvasPoints) {
-      if (typeof earcut === "undefined") {
-        throw new Error("Earcut did not load.");
-      }
-
-      if (typeof JSZip === "undefined") {
-        throw new Error("JSZip did not load.");
-      }
+      if (typeof earcut === "undefined") throw new Error("Earcut did not load.");
+      if (typeof JSZip === "undefined") throw new Error("JSZip did not load.");
 
       const capTriangles = translateTriangles(makeCapTriangles(canvasPoints), -32, 0, 0);
       const designTriangles = translateTriangles(makeRaisedDesignTriangles(canvasPoints), -32, 0, 0);
       const baseTriangles = translateTriangles(makeBaseTriangles(canvasPoints), 32, 0, 0);
 
-      // Object 1: top cap + design together.
-      // The design remains a separate material inside the same 3MF mesh object.
       const topObjectTriangles = [
         ...capTriangles.map(tri => ({ points: tri, material: 0 })),
         ...designTriangles.map(tri => ({ points: tri, material: 1 }))
       ];
 
-      // Object 2: bottom base, beside the top cap.
       const baseObjectTriangles = baseTriangles.map(tri => ({ points: tri, material: 2 }));
 
       const objects = [
@@ -1494,11 +1495,7 @@
 
     function translateTriangles(triangles, dx, dy, dz) {
       return triangles.map(tri =>
-        tri.map(p => ({
-          x: p.x + dx,
-          y: p.y + dy,
-          z: p.z + dz
-        }))
+        tri.map(p => ({ x: p.x + dx, y: p.y + dy, z: p.z + dz }))
       );
     }
 
@@ -1507,13 +1504,8 @@
         .map(mat => `      <base name="${escapeXml(mat.name)}" displaycolor="${mat.color}"/>`)
         .join("\n");
 
-      const objectXml = objects
-        .map(obj => meshObjectTo3MFXml(obj))
-        .join("\n");
-
-      const buildXml = objects
-        .map(obj => `    <item objectid="${obj.id}"/>`)
-        .join("\n");
+      const objectXml = objects.map(obj => meshObjectTo3MFXml(obj)).join("\n");
+      const buildXml = objects.map(obj => `    <item objectid="${obj.id}"/>`).join("\n");
 
       return `<?xml version="1.0" encoding="UTF-8"?>
 <model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
@@ -1535,16 +1527,11 @@ ${buildXml}
       const vertices = [];
       const triangles = [];
 
-      const keyForPoint = (p) =>
-        `${p.x.toFixed(5)},${p.y.toFixed(5)},${p.z.toFixed(5)}`;
+      const keyForPoint = (p) => `${p.x.toFixed(5)},${p.y.toFixed(5)},${p.z.toFixed(5)}`;
 
       const addVertex = (p) => {
         const key = keyForPoint(p);
-
-        if (vertexMap.has(key)) {
-          return vertexMap.get(key);
-        }
-
+        if (vertexMap.has(key)) return vertexMap.get(key);
         const index = vertices.length;
         vertexMap.set(key, index);
         vertices.push(p);
@@ -1591,14 +1578,12 @@ ${trianglesXml}
 
     function downloadBlob(blob, filename) {
       const url = URL.createObjectURL(blob);
-
       const a = document.createElement("a");
       a.href = url;
       a.download = filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
-
       URL.revokeObjectURL(url);
     }
   </script>
